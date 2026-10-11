@@ -28,5 +28,16 @@ jobs:
         run: uv run mypy
       - name: Import contracts (sealed/live isolation)
         run: uv run lint-imports
+      - name: Import contracts must reject violations
+        run: |
+          probe=src/evolvets/updater/_violation_probe.py
+          echo 'import evolvets.arena.sealed' > "$probe"
+          if uv run lint-imports > /dev/null 2>&1; then
+            echo "lint-imports accepted a forbidden import of evolvets.arena.sealed"
+            rm "$probe"
+            exit 1
+          fi
+          rm "$probe"
+          echo "OK: the sealed/live contract rejects violations"
       - name: Tests
         run: uv run pytest

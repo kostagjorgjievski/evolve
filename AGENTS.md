@@ -37,10 +37,11 @@ The **ledger** is the paper. Every number in the paper must be reproducible from
 
 ## 4. Pull requests
 
-- **Agents open PRs; humans merge.** Never merge your own PR. Never approve a PR.
+- The developer agent opens PRs and never merges. A separate reviewer agent reviews every PR and squash-merges it once CI is green and all blocking comments are resolved. Never merge your own PR.
 - Keep PRs small: aim for under ~400 changed lines excluding lockfiles, fixtures and generated files. Split larger work into a stack of PRs and say so in each description.
 - Every PR uses the template in `.github/pull_request_template.md` and fills in every section, including the integrity checklist.
 - CI must be green before requesting review. Never skip, delete, `xfail` or weaken a test or check to get CI green. If a test is wrong, fix it in a separate commit and explain why in the PR.
+- Respond to every review comment, either with a fix commit or with a reply explaining why not. Do not resolve the reviewer's comments yourself.
 - After opening a PR, stop and report the PR link and a 2–3 line summary. Do not start the next PR in the stack until told to, unless the task explicitly says to continue.
 
 ## 5. Code standards

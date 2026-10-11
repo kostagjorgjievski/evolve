@@ -20,7 +20,8 @@ Goal: answer question 1 and have every piece of measurement infrastructure froze
 | 1 | `chore/bootstrap` | Repo, tooling, CI, rules | merged |
 | 2 | `chore/lockfile-and-probe` | Commit `uv.lock`, CI `uv sync --locked`, tighten violation probe | merged (#2) |
 | 3 | `feat/ledger-core` + `feat/ledger-payloads` | Schema v1, canonical JSON, hash-chained append-only writer/reader; all payload kinds | merged (#3, #4) |
-| 4 | `feat/ledger-blobs` | Content-addressed blob store, ordering validator, `evolvets ledger verify` | TASK_002 |
+| 4 | `feat/ledger-blobs` | Content-addressed blob store, ordering validator, `evolvets ledger verify` | merged (#5) |
+| 4b | `feat/requires-predictions` | Explicit `requires_predictions` in `run_start`; PR #5 review nits; then human tags `ledger-schema-v1` | TASK_003 |
 | 5 | `feat/generator` | Synthetic world/system mismatch grammar with true-best forecast per world | spec pending |
 | 6 | `feat/real-data` | ETTh1 + ECL subset download, manifests, chronological splits | spec pending |
 | 7 | `feat/experts-cache` | Five simple experts, look-ahead-safe; prediction cache | spec pending |

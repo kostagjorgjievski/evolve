@@ -1,4 +1,4 @@
-Status: active
+Status: done (PRs #2, #3, #4, #5 merged)
 
 # Task 002: Lockfile, then the ledger (schema v1)
 

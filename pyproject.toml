@@ -42,7 +42,13 @@ warn_return_any = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["evolvets.arena.*", "evolvets.ledger.*", "evolvets.cache.*", "evolvets.experts.*"]
+module = [
+    "evolvets.arena.*",
+    "evolvets.ledger.*",
+    "evolvets.cache.*",
+    "evolvets.experts.*",
+    "evolvets.updater.interfaces",
+]
 strict = true
 
 [tool.pytest.ini_options]

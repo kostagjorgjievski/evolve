@@ -1,5 +1,7 @@
 """Kind-specific validation rules for the eight later payload kinds."""
 
+import uuid
+
 import pytest
 
 from evolvets.ledger.payloads import (
@@ -23,8 +25,32 @@ SEED_KWARGS = dict(
 )
 
 
-def _record(stream, kind, payload):
-    return make_record(stream=stream, kind=kind, payload=payload, **SEED_KWARGS)
+def _record(stream, kind, payload, refers_to=()):
+    return make_record(
+        stream=stream, kind=kind, payload=payload, refers_to=refers_to, **SEED_KWARGS
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "count"), [("prediction", 1), ("evaluation", 1), ("acceptance", 2), ("correction", 1)]
+)
+def test_linked_kinds_accept_exact_refers_to(kind, count, request):
+    payload = request.getfixturevalue(kind)
+    refs = [str(uuid.uuid4()) for _ in range(count)]
+    record = _record("main", kind, payload, refers_to=refs)
+    assert record.refers_to == refs
+
+
+@pytest.mark.parametrize(
+    ("kind", "count"), [("prediction", 1), ("evaluation", 1), ("acceptance", 2), ("correction", 1)]
+)
+def test_linked_kinds_reject_wrong_refers_to_length(kind, count, request):
+    payload = request.getfixturevalue(kind)
+    wrong = [str(uuid.uuid4()) for _ in range(count + 1)]
+    with pytest.raises(RecordError, match="refer to exactly"):
+        _record("main", kind, payload, refers_to=wrong)
+    with pytest.raises(RecordError, match="refer to exactly"):
+        _record("main", kind, payload, refers_to=[])
 
 
 def test_non_monotone_quantiles_rejected():
@@ -123,15 +149,16 @@ def test_evaluation_metrics_must_be_floats(evaluation):
 
 
 def test_sealed_pool_in_main_stream_rejected(evaluation, baseline):
+    ref = [str(uuid.uuid4())]
     for kind, payload in (("evaluation", evaluation), ("baseline", baseline)):
         sealed = type(payload)(**{**vars(payload), "pool": "sealed"})
         with pytest.raises(RecordError, match="sealed stream"):
-            _record("main", kind, sealed)
+            _record("main", kind, sealed, refers_to=ref)
 
 
 def test_sealed_pool_in_sealed_stream_allowed(evaluation):
     sealed = Evaluation(**{**vars(evaluation), "pool": "sealed"})
-    record = _record("sealed", "evaluation", sealed)
+    record = _record("sealed", "evaluation", sealed, refers_to=[str(uuid.uuid4())])
     assert record.payload.pool == "sealed"
 
 
@@ -153,3 +180,74 @@ def test_commitment_requires_blob_ref():
 def test_correction_allows_null_replacement():
     correction = Correction(reason="r", replacement=None)
     assert correction.replacement is None
+
+
+def test_non_llm_proposer_accepted(proposal):
+    assert proposal.proposer["model"] is None
+    assert proposal.proposer["temperature"] is None
+    assert proposal.prompt_blob is None and proposal.response_blob is None
+
+
+def test_proposer_bad_model_type_rejected(proposal):
+    bad = dict(proposal.proposer)
+    bad["model"] = 7
+    with pytest.raises(PayloadError, match=r"proposer\.model"):
+        Proposal(**{**vars(proposal), "proposer": bad})
+
+
+def test_proposer_bad_temperature_type_rejected(proposal):
+    bad = dict(proposal.proposer)
+    bad["temperature"] = "hot"
+    with pytest.raises(PayloadError, match=r"proposer\.temperature"):
+        Proposal(**{**vars(proposal), "proposer": bad})
+
+
+def test_evaluation_ok_with_error_rejected(evaluation):
+    with pytest.raises(PayloadError, match="error must be None"):
+        Evaluation(**{**vars(evaluation), "error": "should not be here"})
+
+
+def test_evaluation_failed_without_error_rejected(evaluation):
+    with pytest.raises(PayloadError, match="non-empty string"):
+        Evaluation(**{**vars(evaluation), "status": "failed", "error": None})
+
+
+def test_evaluation_failed_with_empty_error_rejected(evaluation):
+    with pytest.raises(PayloadError, match="non-empty string"):
+        Evaluation(**{**vars(evaluation), "status": "timeout", "error": ""})
+
+
+def test_evaluation_failed_with_error_accepted(evaluation):
+    failed = Evaluation(**{**vars(evaluation), "status": "failed", "error": "sandbox OOM"})
+    assert failed.error == "sandbox OOM"
+
+
+def test_allocation_duplicate_candidates_rejected(allocation):
+    duplicated = [*allocation.candidates, allocation.candidates[0]]
+    with pytest.raises(PayloadError, match="duplicates"):
+        Allocation(
+            allocator=allocation.allocator,
+            candidates=duplicated,
+            chosen=[],
+            scores={},
+        )
+
+
+def test_allocation_duplicate_chosen_rejected(allocation):
+    with pytest.raises(PayloadError, match="duplicates"):
+        Allocation(
+            allocator=allocation.allocator,
+            candidates=allocation.candidates,
+            chosen=[allocation.candidates[0], allocation.candidates[0]],
+            scores={},
+        )
+
+
+def test_allocation_scores_must_reference_candidates(allocation):
+    with pytest.raises(PayloadError, match="scores keys"):
+        Allocation(
+            allocator=allocation.allocator,
+            candidates=allocation.candidates,
+            chosen=[],
+            scores={str(uuid.uuid4()): 0.5},
+        )

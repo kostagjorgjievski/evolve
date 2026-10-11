@@ -76,7 +76,7 @@ def proposal(blob_ref):
         prompt_blob=None,
         response_blob=None,
         diagnosis="weights adapt too slowly after regime shifts",
-        proposer={"id": "improver", "version": "3", "model": "none", "temperature": 0.0},
+        proposer={"id": "improver", "version": "3", "model": None, "temperature": None},
         improver_version="3",
         planted_defect=None,
     )

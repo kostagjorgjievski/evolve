@@ -207,8 +207,12 @@ class Proposal:
         _require_exact_keys("proposer", self.proposer, PROPOSER_KEYS)
         _require_str("proposer.id", self.proposer["id"])
         _require_str("proposer.version", self.proposer["version"])
-        _require_str("proposer.model", self.proposer["model"])
-        _require_float("proposer.temperature", self.proposer["temperature"])
+        # model and temperature are null for non-LLM proposers (random
+        # mutation, search); inventing values would contaminate the record.
+        if self.proposer["model"] is not None:
+            _require_str("proposer.model", self.proposer["model"])
+        if self.proposer["temperature"] is not None:
+            _require_float("proposer.temperature", self.proposer["temperature"])
         _require_str("improver_version", self.improver_version)
         if self.planted_defect is not None:
             _require_exact_keys("planted_defect", self.planted_defect, PLANTED_DEFECT_KEYS)
@@ -257,9 +261,15 @@ class Allocation:
             raise PayloadError("chosen must be a list of record ids")
         for record_id in self.candidates + self.chosen:
             _require_uuid_str("candidates/chosen entry", record_id)
+        if len(set(self.candidates)) != len(self.candidates):
+            raise PayloadError("candidates must not contain duplicates")
+        if len(set(self.chosen)) != len(self.chosen):
+            raise PayloadError("chosen must not contain duplicates")
         if not set(self.chosen) <= set(self.candidates):
             raise PayloadError("chosen must be a subset of candidates")
         _require_float_dict("scores", self.scores)
+        if not set(self.scores) <= set(self.candidates):
+            raise PayloadError("scores keys must be candidate record ids")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -277,8 +287,13 @@ class Evaluation:
         _require_literal("status", self.status, EVALUATION_STATUSES)
         _require_float_dict("metrics", self.metrics)
         _require_nullable_blob_ref("per_task_blob", self.per_task_blob)
-        if self.error is not None:
-            _require_str("error", self.error)
+        # Failures are part of the record: an unexplained failure cannot be
+        # audited, and a success carrying an error would mislead the reader.
+        if self.status == "ok":
+            if self.error is not None:
+                raise PayloadError("error must be None when status is 'ok'")
+        elif not isinstance(self.error, str) or not self.error:
+            raise PayloadError("error must be a non-empty string when status is not 'ok'")
 
 
 @dataclasses.dataclass(frozen=True)

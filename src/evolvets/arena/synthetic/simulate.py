@@ -105,6 +105,8 @@ def simulate_from_innovations(spec: WorldSpec, z: Sequence[float]) -> World:
     if len(z) != spec.length:
         raise ValueError(f"z must have length {spec.length}, got {len(z)}")
     for i, value in enumerate(z):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"z[{i}] must be a float, got {value!r}")
         if not math.isfinite(value):
             raise ValueError(f"z[{i}] must be finite, got {value!r}")
     mean = _mean_path(spec)

@@ -3,16 +3,21 @@
 A :class:`WorldSpec` fixes the mean path, the AR(1) noise parameters and the
 noise bursts of a world, so that simulation, the oracle and the ledger all
 agree on what the world is. Validation happens at construction time: an
-invalid spec can never enter a simulation or a ledger record.
+invalid spec can never enter a simulation or a ledger record. Construction
+also freezes ``regimes``/``bursts`` into tuples and normalises every float
+field to ``float``, so specs that compare equal also serialise and hash
+identically.
 """
 
 import math
 from dataclasses import dataclass, fields
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 TWO_PI = 2.0 * math.pi
 
 _TRANSITIONS = ("sudden", "gradual")
+
+T = TypeVar("T")
 
 
 class WorldSpecError(ValueError):
@@ -25,12 +30,33 @@ def _require_int(name: str, value: Any) -> None:
         raise WorldSpecError(f"{name} must be an int, got {value!r}")
 
 
-def _require_finite_float(name: str, value: Any) -> None:
-    """Check that ``value`` is a finite float."""
+def _to_finite_float(name: str, value: Any) -> float:
+    """Return ``value`` as a float, raising WorldSpecError unless it is finite."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise WorldSpecError(f"{name} must be a float, got {value!r}")
-    if not math.isfinite(value):
+    try:
+        result = float(value)
+    except OverflowError:
+        raise WorldSpecError(f"{name} must be a finite float, got {value!r}") from None
+    if not math.isfinite(result):
         raise WorldSpecError(f"{name} must be finite, got {value!r}")
+    # -0.0 equals 0.0 but serialises differently; keep the positive zero so
+    # equal specs hash identically.
+    return result + 0.0
+
+
+def _as_member_tuple(name: str, value: Any, member_cls: type[T], member_name: str) -> tuple[T, ...]:
+    """Return ``value`` as a tuple of ``member_cls`` instances."""
+    try:
+        items = tuple(value)
+    except TypeError:
+        raise WorldSpecError(
+            f"WorldSpec.{name} must be a sequence of {member_name}, got {value!r}"
+        ) from None
+    for item in items:
+        if not isinstance(item, member_cls):
+            raise WorldSpecError(f"WorldSpec.{name} entries must be {member_name}, got {item!r}")
+    return items
 
 
 @dataclass(frozen=True)
@@ -53,8 +79,10 @@ class Regime:
         _require_int("Regime.ramp", self.ramp)
         if self.start < 0:
             raise WorldSpecError(f"Regime.start must be >= 0, got {self.start}")
+        # Normalise before the range checks so validation and serialisation
+        # both see the same float value.
         for name in ("level", "slope", "season_amp", "season_phase", "ar_phi", "sigma"):
-            _require_finite_float(f"Regime.{name}", getattr(self, name))
+            object.__setattr__(self, name, _to_finite_float(f"Regime.{name}", getattr(self, name)))
         if self.season_amp < 0:
             raise WorldSpecError(f"Regime.season_amp must be >= 0, got {self.season_amp}")
         if not 0.0 <= self.season_phase < TWO_PI:
@@ -90,7 +118,9 @@ class NoiseBurst:
     def __post_init__(self) -> None:
         _require_int("NoiseBurst.start", self.start)
         _require_int("NoiseBurst.length", self.length)
-        _require_finite_float("NoiseBurst.sigma_mult", self.sigma_mult)
+        object.__setattr__(
+            self, "sigma_mult", _to_finite_float("NoiseBurst.sigma_mult", self.sigma_mult)
+        )
         if self.start < 0:
             raise WorldSpecError(f"NoiseBurst.start must be >= 0, got {self.start}")
         if self.length < 1:
@@ -101,7 +131,13 @@ class NoiseBurst:
 
 @dataclass(frozen=True)
 class WorldSpec:
-    """A complete world: regimes for the mean and noise, plus noise bursts."""
+    """A complete world: regimes for the mean and noise, plus noise bursts.
+
+    ``regimes`` and ``bursts`` may be given as any iterable, but are frozen
+    into tuples (of exactly ``Regime``/``NoiseBurst``) at construction, so a
+    spec cannot be mutated or invalidated through the sequence it was built
+    from.
+    """
 
     length: int  # >= 2
     period: int  # seasonal period, >= 2
@@ -109,6 +145,12 @@ class WorldSpec:
     bursts: tuple[NoiseBurst, ...]
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "regimes", _as_member_tuple("regimes", self.regimes, Regime, "Regime")
+        )
+        object.__setattr__(
+            self, "bursts", _as_member_tuple("bursts", self.bursts, NoiseBurst, "NoiseBurst")
+        )
         _require_int("WorldSpec.length", self.length)
         _require_int("WorldSpec.period", self.period)
         if self.length < 2:

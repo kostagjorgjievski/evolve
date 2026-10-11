@@ -10,7 +10,13 @@ from evolvets.arena.synthetic.simulate import (
     standard_normals,
     world_fingerprint,
 )
-from evolvets.arena.synthetic.spec import NoiseBurst, Regime, WorldSpec, WorldSpecError
+from evolvets.arena.synthetic.spec import (
+    NoiseBurst,
+    Regime,
+    WorldSpec,
+    WorldSpecError,
+    spec_to_dict,
+)
 
 
 def _regime(
@@ -43,11 +49,11 @@ def _spec(regimes, bursts=(), length=100, period=24):
     return WorldSpec(length=length, period=period, regimes=regimes, bursts=tuple(bursts))
 
 
-def test_valid_multi_regime_spec_constructs():
-    """One spec with a gradual ramp, a recurring regime and two bursts is valid."""
+def _multi_regime_spec():
+    """A valid spec with a gradual ramp, a recurring regime and two bursts."""
     base = _regime(level=1.0, slope=0.01, season_amp=2.0, season_phase=0.3, ar_phi=0.5, sigma=0.8)
     recurring_level = 1.0 + 0.01 * (70 - 0)
-    spec = _spec(
+    return _spec(
         [
             base,
             _regime(start=30, level=3.0, slope=-0.02, transition="gradual", ramp=10),
@@ -68,6 +74,11 @@ def test_valid_multi_regime_spec_constructs():
         ],
         length=100,
     )
+
+
+def test_valid_multi_regime_spec_constructs():
+    """One spec with a gradual ramp, a recurring regime and two bursts is valid."""
+    spec = _multi_regime_spec()
     assert spec.length == 100
     assert spec.bursts[1].start == 85
 
@@ -227,6 +238,70 @@ def test_bad_burst_multiplier_rejected():
         NoiseBurst(start=10, length=5, sigma_mult=1.0)
 
 
+# --- construction freezes and normalises: equal specs are one spec ---
+
+
+def test_spec_from_list_cannot_be_invalidated():
+    """Mutating the sequences a spec was built from leaves the spec unchanged."""
+    regimes = [_regime()]
+    bursts = [NoiseBurst(start=20, length=5, sigma_mult=2.0)]
+    spec = _spec(regimes, bursts=bursts, length=100)
+    frozen = _spec([_regime()], bursts=[NoiseBurst(start=20, length=5, sigma_mult=2.0)], length=100)
+    regimes.append(_regime(start=50))
+    regimes.append(_regime(start=5))  # starts would no longer be increasing
+    bursts.append(NoiseBurst(start=0, length=10, sigma_mult=2.0))  # unsorted now
+    assert spec == frozen
+    assert hash(spec) == hash(frozen)
+    assert simulate(spec, 1).change_points == ()
+
+
+def test_non_member_elements_rejected():
+    """A dict among the regimes or a str among the bursts raises WorldSpecError."""
+    with pytest.raises(WorldSpecError, match="Regime"):
+        _spec([{"start": 0}])
+    with pytest.raises(WorldSpecError, match="NoiseBurst"):
+        _spec([_regime()], bursts=["not a burst"])
+
+
+def test_non_iterable_members_rejected():
+    with pytest.raises(WorldSpecError, match="regimes"):
+        WorldSpec(length=10, period=24, regimes=7, bursts=())
+
+
+def test_int_and_float_specs_share_fingerprint():
+    """Writing 1 or 1.0 for a float field gives one and the same world."""
+    int_spec = _spec(
+        [_regime(level=1, slope=0, season_amp=2, season_phase=0, ar_phi=0, sigma=1)],
+        bursts=[NoiseBurst(start=10, length=5, sigma_mult=2)],
+        length=100,
+    )
+    float_spec = _spec(
+        [_regime(level=1.0, slope=0.0, season_amp=2.0, season_phase=0.0, ar_phi=0.0, sigma=1.0)],
+        bursts=[NoiseBurst(start=10, length=5, sigma_mult=2.0)],
+        length=100,
+    )
+    assert int_spec == float_spec
+    assert spec_to_dict(int_spec) == spec_to_dict(float_spec)
+    assert world_fingerprint(simulate(int_spec, 3)) == world_fingerprint(simulate(float_spec, 3))
+
+
+def test_oversized_int_float_field_rejected():
+    """A float field too large for a float raises WorldSpecError, not OverflowError."""
+    with pytest.raises(WorldSpecError, match="finite"):
+        _regime(level=10**400)
+    with pytest.raises(WorldSpecError, match="finite"):
+        NoiseBurst(start=0, length=5, sigma_mult=10**400)
+
+
+def test_negative_zero_normalised():
+    """-0.0 equals 0.0, so it is stored and serialised as 0.0."""
+    spec = _spec([_regime(level=-0.0, slope=-0.0)])
+    twin = _spec([_regime(level=0.0, slope=0.0)])
+    assert math.copysign(1.0, spec.regimes[0].level) == 1.0
+    assert spec_to_dict(spec) == spec_to_dict(twin)
+    assert world_fingerprint(simulate(spec, 2)) == world_fingerprint(simulate(twin, 2))
+
+
 # --- standard_normals ---
 
 
@@ -275,6 +350,15 @@ def test_simulate_rejects_nan_z():
     spec = _spec([_regime()], length=3)
     with pytest.raises(ValueError, match="finite"):
         simulate_from_innovations(spec, (0.0, math.nan, 0.0))
+
+
+def test_simulate_rejects_non_number_z():
+    """A z containing a string or a bool raises ValueError, not TypeError."""
+    spec = _spec([_regime()], length=3)
+    with pytest.raises(ValueError, match=r"z\[1\]"):
+        simulate_from_innovations(spec, (0.0, "x", 0.0))
+    with pytest.raises(ValueError, match=r"z\[0\]"):
+        simulate_from_innovations(spec, (True, 0.0, 0.0))
 
 
 # --- mean path ---
@@ -379,6 +463,21 @@ def test_golden_fingerprint():
 
 
 _GOLDEN = "a14f3c397c90e60acadd0cc02f90b1848cf3a533a7f2feebfc63f3c54aa1dd3b"
+
+
+def test_golden_fingerprint_multi_regime():
+    """Pinned fingerprint of the multi-regime spec at seed 12345.
+
+    The two-regime golden above pins only sudden changes and constant noise;
+    this one pins the gradual ramp, the recurring regime and the bursts.
+    Changing this value means the generator's output changed and
+    GENERATOR_VERSION must be bumped.
+    """
+    world = simulate(_multi_regime_spec(), 12345)
+    assert world_fingerprint(world) == _GOLDEN_MULTI
+
+
+_GOLDEN_MULTI = "dfc44c7dacd6848b8bf8909fa9f3cf8d3a81ee4450106c672a39f120d0d980bc"
 
 
 def test_world_metadata_matches_spec():

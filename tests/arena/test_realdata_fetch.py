@@ -170,9 +170,15 @@ def test_mid_stream_failure_cleans_up_and_stale_part_is_overwritten(
     assert not stale.exists()
     assert not manifest_file.exists()
 
+    # A hard kill between the cleanup above and the next download is the one
+    # case that leaves a stale .part behind. Recreate it by hand (as the task
+    # spec puts it) and require the next fetch to truncate, not append: the
+    # target must equal the fixture and hash to the manifest just written.
+    stale.write_bytes(b"junk left by a hard kill")
     monkeypatch.setattr(urllib.request, "urlopen", real_urlopen)
     manifest = fetch(source, data_root, manifest_dir, today=date(2026, 10, 11))
     assert target.read_bytes() == _FIXTURE_BYTES
+    assert file_sha256(target) == (manifest.sha256, manifest.size_bytes)
     assert manifest.sha256 == hashlib.sha256(_FIXTURE_BYTES).hexdigest()
     assert not stale.exists()
 
@@ -249,6 +255,21 @@ def test_cli_fetch_and_verify_all(
     out = capsys.readouterr().out.splitlines()
     assert out[0] == expected[0]
     assert out[1].startswith("FAIL ecl: ")
+
+
+def test_cli_reports_pathological_manifest_without_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], cli_sources: dict[str, Source]
+) -> None:
+    data_root, manifest_dir = tmp_path / "data", tmp_path / "manifests"
+    manifest_dir.mkdir(parents=True)
+    raw_manifest_path(manifest_dir, "etth1").write_text("[" * 100_000, encoding="utf-8")
+
+    assert cli.main(["data", "verify", "etth1", *_data_args(data_root, manifest_dir)]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    out_lines = captured.out.splitlines()
+    assert len(out_lines) == 1
+    assert out_lines[0].startswith("FAIL etth1: ")
 
 
 def test_cli_rejects_unknown_dataset(capsys: pytest.CaptureFixture[str]) -> None:

@@ -90,6 +90,7 @@ def test_read_rejects_malformed_files(tmp_path: Path) -> None:
         write(json.dumps({**good, "extra": 1})),
         write("[1, 2]"),
         write("{not json"),
+        write("[" * 100_000),  # pathological nesting: RecursionError, not a crash
         write(json.dumps({**good, "sha256": good["sha256"].upper()})),
         write(json.dumps({**good, "sha256": good["sha256"][:63]})),
         write(json.dumps({**good, "size_bytes": 0})),

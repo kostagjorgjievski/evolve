@@ -104,7 +104,10 @@ def read_raw_manifest(path: Path, source: Source) -> RawManifest:
     """
     try:
         obj = json.loads(path.read_text(encoding="utf-8"))
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
+        # RecursionError: pathologically nested JSON is malformed input, not a
+        # crash, so it reports like any other bad manifest instead of escaping
+        # to the CLI as a traceback.
         raise ManifestError(f"{path}: not valid JSON: {exc}") from exc
     if not isinstance(obj, dict):
         raise ManifestError(f"{path}: manifest must be a JSON object, got {type(obj).__name__}")

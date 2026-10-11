@@ -1,4 +1,4 @@
-Status: active
+Status: done (PR A merged as #34; PR B split by the size rule: dev pools in #35, metrics and replay_dataset here)
 
 # Task 007: Arena replay loop, horizon-aware label release and metrics
 

@@ -15,11 +15,13 @@ import dataclasses
 import json
 import os
 import socket
+import time
 from collections.abc import Iterator, Sequence
 from datetime import UTC
 from pathlib import Path
 from typing import Any, cast
 
+from evolvets.ledger.blobs import BlobError, BlobStore, find_blob_refs
 from evolvets.ledger.canonical import canonical_bytes, canonical_json, sha256_hex
 from evolvets.ledger.payloads import Payload, PayloadError, validate_kind_payload
 from evolvets.ledger.schema import (
@@ -30,6 +32,9 @@ from evolvets.ledger.schema import (
     RecordError,
     make_record,
 )
+
+# An empty lock file this old means its writer died before writing metadata.
+STALE_EMPTY_LOCK_SECONDS = 600
 
 
 class LedgerError(Exception):
@@ -56,15 +61,6 @@ def _write_lock_metadata(fd: int) -> None:
     os.write(fd, json.dumps(metadata).encode("utf-8"))
 
 
-def _read_lock_metadata(path: Path) -> dict[str, Any] | None:
-    """Read lock metadata; ``None`` when missing, corrupt or not an object."""
-    try:
-        data: Any = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
 def _pid_alive(pid: object) -> bool:
     """Whether a pid exists on this host (unparseable pids count as dead)."""
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
@@ -79,9 +75,31 @@ def _pid_alive(pid: object) -> bool:
 
 
 def _stale_reason(path: Path) -> str | None:
-    """Why this lock is stale, or ``None`` when live, foreign or unreadable."""
-    metadata = _read_lock_metadata(path)
-    if metadata is None:
+    """Why this lock is stale, or ``None`` when live, foreign or unreadable.
+
+    An empty lock file means its writer died between creating the lock and
+    writing the metadata; it counts as stale once it is older than
+    ``STALE_EMPTY_LOCK_SECONDS`` (the writer fills in the metadata within
+    microseconds, so a fresh empty lock is treated as live).
+    """
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not content.strip():
+        age = time.time() - path.stat().st_mtime
+        if age < STALE_EMPTY_LOCK_SECONDS:
+            return None
+        return (
+            f"stale lock: empty lock file, age {age:.0f}s >= "
+            f"{STALE_EMPTY_LOCK_SECONDS}s (writer died before writing metadata); "
+            f"recover with LedgerWriter.break_stale_lock"
+        )
+    try:
+        metadata: Any = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(metadata, dict):
         return None
     host = metadata.get("host")
     pid = metadata.get("pid")
@@ -263,8 +281,13 @@ class LedgerReader:
                 raise LedgerCorruptError(f"{self._dir / (stream + '.jsonl')}: {problem}")
             yield from read
 
-    def verify(self) -> VerifyResult:
-        """Check hashes, chain links and seq continuity; report the first break."""
+    def verify(self, check_blobs: bool = False) -> VerifyResult:
+        """Check hashes, chain links, seq continuity and blob references.
+
+        With ``check_blobs`` every ``sha256:...`` reference in every payload
+        must exist in the run's blob store and hash to itself. The first
+        broken position is reported; the chain is checked before the blobs.
+        """
         main_path = self._dir / "main.jsonl"
         if not main_path.exists():
             return VerifyResult(False, "main", None, f"missing ledger stream file {main_path}", 0)
@@ -273,5 +296,20 @@ class LedgerReader:
             read, problem, position = _scan_stream(self._dir / f"{stream}.jsonl")
             if problem is not None:
                 return VerifyResult(False, stream, position, problem, total)
+            if check_blobs:
+                blob_result = self._verify_blobs(read, stream)
+                if blob_result is not None:
+                    return blob_result
             total += len(read)
         return VerifyResult(True, None, None, "ok", total)
+
+    def _verify_blobs(self, records: list[Record], stream: str) -> VerifyResult | None:
+        """Check every blob reference of ``records``; ``None`` when all exist."""
+        store = BlobStore(self._dir / "blobs")
+        for record in records:
+            for ref in find_blob_refs(dataclasses.asdict(record.payload)):
+                try:
+                    store.get(ref)
+                except BlobError as exc:
+                    return VerifyResult(False, stream, record.seq, f"blob check failed: {exc}", 0)
+        return None

@@ -1,6 +1,6 @@
 # EvolveTS Roadmap
 
-Owner of this file: the planner/reviewer agent. The developer agent implements one PR at a time from the current task file in `docs/tasks/`, and the reviewer agent reviews and squash-merges. Do not start a PR that is not yet specified in a task file.
+Owner of this file: the planner agent (`docs/agents/planner.md`). The developer agent implements one PR at a time from the active task file in `docs/tasks/`, and the reviewer agent reviews and squash-merges. Do not start a PR that is not yet specified in a task file. The status column records which task covers each entry, or its merged PR numbers.
 
 ## The research questions, in dependency order
 
@@ -18,8 +18,8 @@ Goal: answer question 1 and have every piece of measurement infrastructure froze
 | # | Branch | Content | Status |
 |---|---|---|---|
 | 1 | `chore/bootstrap` | Repo, tooling, CI, rules | merged |
-| 2 | `chore/lockfile-and-probe` | Commit `uv.lock`, CI `uv sync --locked`, tighten violation probe | TASK_002 |
-| 3 | `feat/ledger-core` | Schema v1, canonical JSON, hash-chained append-only writer/reader | TASK_002 |
+| 2 | `chore/lockfile-and-probe` | Commit `uv.lock`, CI `uv sync --locked`, tighten violation probe | merged (#2) |
+| 3 | `feat/ledger-core` + `feat/ledger-payloads` | Schema v1, canonical JSON, hash-chained append-only writer/reader; all payload kinds | merged (#3, #4) |
 | 4 | `feat/ledger-blobs` | Content-addressed blob store, ordering validator, `evolvets ledger verify` | TASK_002 |
 | 5 | `feat/generator` | Synthetic world/system mismatch grammar with true-best forecast per world | spec pending |
 | 6 | `feat/real-data` | ETTh1 + ECL subset download, manifests, chronological splits | spec pending |

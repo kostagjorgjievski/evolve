@@ -1,3 +1,5 @@
+Status: active
+
 # Task 002: Lockfile, then the ledger (schema v1)
 
 Read `AGENTS.md` and `docs/ROADMAP.md` first. This task replaces the PR 2 section of TASK_001. It is a stack of three PRs; open them in order and stop after each one for review.

@@ -82,16 +82,28 @@ def manifest_text(obj: dict[str, object]) -> str:
     return json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
 
 
-def write_raw_manifest(path: Path, manifest: RawManifest) -> None:
-    """Write ``manifest`` as JSON (in a ``.yaml`` file), atomically."""
-    text = manifest_text(asdict(manifest))
+def write_atomic(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` via a flushed, fsynced temp file and replace.
+
+    A crash can never leave a partial file under ``path``; if the final
+    replace fails, the temp file is removed so nothing partial remains.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / (path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def write_raw_manifest(path: Path, manifest: RawManifest) -> None:
+    """Write ``manifest`` as JSON (in a ``.yaml`` file), atomically."""
+    write_atomic(path, (manifest_text(asdict(manifest))).encode("utf-8"))
 
 
 def read_raw_manifest(path: Path, source: Source) -> RawManifest:

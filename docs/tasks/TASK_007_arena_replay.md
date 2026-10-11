@@ -232,7 +232,9 @@ class DevSeries:
     score_start: int  # first scored origin
     score_end: int  # exclusive; also the replay's end_origin
     change_points: tuple[int, ...]  # synthetic only, else ()
-    oracle: tuple[tuple[float, ...], ...] | None  # true-best forecasts, [origin - score_start][h-1]; synthetic only
+    oracle: (
+        tuple[tuple[float, ...], ...] | None
+    )  # true-best forecasts, [origin - score_start][h-1]; synthetic only
 
 
 @dataclass(frozen=True)
@@ -244,7 +246,9 @@ class DevPool:
     series: tuple[DevSeries, ...]  # cache manifest order
 
 
-def load_dev_pool(dataset: str, cache_root: Path, data_root: Path, manifest_dir: Path) -> DevPool: ...
+def load_dev_pool(
+    dataset: str, cache_root: Path, data_root: Path, manifest_dir: Path
+) -> DevPool: ...
 ```
 
 `arena/metrics.py`
@@ -294,13 +298,17 @@ class ReplayResult:
 def replay_dataset(
     updater: Updater, config: Mapping[str, ConfigValue], seed: int, pool: DevPool
 ) -> ReplayResult: ...
-def result_to_obj(result: ReplayResult) -> dict[str, object]: ...  # JSON-ready, canonical_bytes-able
+def result_to_obj(
+    result: ReplayResult,
+) -> dict[str, object]: ...  # JSON-ready, canonical_bytes-able
 ```
 
 `arena/versions.py`
 
 ```python
 def protocol_versions() -> dict[str, str]: ...
+
+
 # {"ledger": SCHEMA_VERSION, "arena": ARENA_VERSION, "generator": GENERATOR_VERSION,
 #  "cache_manifest": CACHE_VERSION}
 ```

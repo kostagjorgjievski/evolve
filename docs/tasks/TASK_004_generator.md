@@ -1,4 +1,4 @@
-Status: active
+Status: done
 
 # Task 004: Synthetic world generator with true-best forecast
 

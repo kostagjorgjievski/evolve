@@ -1,0 +1,15 @@
+[importlinter]
+root_package = evolvets
+include_external_packages = False
+
+[importlinter:contract:sealed-isolation]
+name = Agent-editable packages never reach sealed or live data
+type = forbidden
+source_modules =
+    evolvets.updater
+    evolvets.improver
+    evolvets.selfmodel
+    evolvets.allocator
+forbidden_modules =
+    evolvets.arena.sealed
+    evolvets.arena.live

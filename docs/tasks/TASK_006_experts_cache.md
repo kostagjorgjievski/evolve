@@ -45,18 +45,29 @@ class Expert(Protocol):
 `experts/simple.py`
 
 ```python
-class Naive: ...  # name "naive"
-class SeasonalNaive: ...  # name "seasonal_naive"; __init__(self, period: int)
-class SimpleExpSmoothing: ...  # name "ses"; __init__(self, alpha: float = 0.3)
-class DampedHoltWinters: ...  # name "holt_winters"; __init__(self, period: int, alpha: float = 0.2,
-#                                beta: float = 0.01, gamma: float = 0.1, phi: float = 0.98)
+# name "naive"
+class Naive: ...
+
+
+# name "seasonal_naive"; __init__(self, period: int)
+class SeasonalNaive: ...
+
+
+# name "ses"; __init__(self, alpha: float = 0.3)
+class SimpleExpSmoothing: ...
+
+
+# name "holt_winters"; __init__(self, period: int, alpha: float = 0.2, beta: float = 0.01,
+#                               gamma: float = 0.1, phi: float = 0.98)
+class DampedHoltWinters: ...
 ```
 
 `experts/ridge.py`
 
 ```python
-class RidgeAR: ...  # name "ar_ridge"; __init__(self, period: int, window: int = 240,
-#                     refit_every: int = 24, ridge: float = 1.0)
+# name "ar_ridge"; __init__(self, period: int, window: int = 240, refit_every: int = 24,
+#                           ridge: float = 1.0)
+class RidgeAR: ...
 ```
 
 `experts/pool.py`
@@ -65,7 +76,7 @@ class RidgeAR: ...  # name "ar_ridge"; __init__(self, period: int, window: int =
 EXPERT_NAMES = ("naive", "seasonal_naive", "ses", "holt_winters", "ar_ridge")  # cache order
 
 
-def make_pool(period: int) -> tuple[Expert, ...]: ...  # fresh instances, in EXPERT_NAMES order, default params
+def make_pool(period: int) -> tuple[Expert, ...]: ...  # fresh, in EXPERT_NAMES order, defaults
 def first_origin(period: int) -> int: ...  # max(min_history) - 1 over make_pool(period)
 def run_pool(
     values: Sequence[float], period: int, horizon: int
@@ -196,6 +207,7 @@ class SeriesForecasts:
     series_id: str
     first_origin: int
     last_origin: int  # length - 1
+
     def at(self, origin: int) -> tuple[tuple[float, ...], ...]: ...  # [expert][h-1]
     def expert_forecast(self, origin: int, expert: str) -> tuple[float, ...]: ...
 ```

@@ -1,0 +1,233 @@
+{
+  "dataset": "etth1",
+  "manifest_version": "1",
+  "max_horizon": 168,
+  "public_sha256": "7b5128e4cce2b7a7a443f7c21e632fc30941294d028225fb0e147c3428e0c802",
+  "raw_sha256": "f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066",
+  "realdata_version": "1",
+  "sealed_sha256": "74140be7732b0851e2ef8e090bc677f82492053b76dff243d4668c8686b62ecc",
+  "series": [
+    {
+      "length": 17420,
+      "segments": {
+        "dev": {
+          "end": 9471,
+          "first_time": "2016-11-25 23:00:00",
+          "last_time": "2017-07-30 14:00:00",
+          "start": 3551
+        },
+        "reserve": {
+          "end": 17420,
+          "first_time": "2018-03-13 01:00:00",
+          "last_time": "2018-06-26 19:00:00",
+          "start": 14881
+        },
+        "sealed": {
+          "end": 14713,
+          "first_time": "2017-08-06 15:00:00",
+          "last_time": "2018-03-06 00:00:00",
+          "start": 9639
+        },
+        "warmup": {
+          "end": 3383,
+          "first_time": "2016-07-01 00:00:00",
+          "last_time": "2016-11-18 22:00:00",
+          "start": 0
+        }
+      },
+      "series_id": "etth1/HUFL",
+      "start": "2016-07-01 00:00:00"
+    },
+    {
+      "length": 17420,
+      "segments": {
+        "dev": {
+          "end": 9471,
+          "first_time": "2016-11-25 23:00:00",
+          "last_time": "2017-07-30 14:00:00",
+          "start": 3551
+        },
+        "reserve": {
+          "end": 17420,
+          "first_time": "2018-03-13 01:00:00",
+          "last_time": "2018-06-26 19:00:00",
+          "start": 14881
+        },
+        "sealed": {
+          "end": 14713,
+          "first_time": "2017-08-06 15:00:00",
+          "last_time": "2018-03-06 00:00:00",
+          "start": 9639
+        },
+        "warmup": {
+          "end": 3383,
+          "first_time": "2016-07-01 00:00:00",
+          "last_time": "2016-11-18 22:00:00",
+          "start": 0
+        }
+      },
+      "series_id": "etth1/HULL",
+      "start": "2016-07-01 00:00:00"
+    },
+    {
+      "length": 17420,
+      "segments": {
+        "dev": {
+          "end": 9471,
+          "first_time": "2016-11-25 23:00:00",
+          "last_time": "2017-07-30 14:00:00",
+          "start": 3551
+        },
+        "reserve": {
+          "end": 17420,
+          "first_time": "2018-03-13 01:00:00",
+          "last_time": "2018-06-26 19:00:00",
+          "start": 14881
+        },
+        "sealed": {
+          "end": 14713,
+          "first_time": "2017-08-06 15:00:00",
+          "last_time": "2018-03-06 00:00:00",
+          "start": 9639
+        },
+        "warmup": {
+          "end": 3383,
+          "first_time": "2016-07-01 00:00:00",
+          "last_time": "2016-11-18 22:00:00",
+          "start": 0
+        }
+      },
+      "series_id": "etth1/MUFL",
+      "start": "2016-07-01 00:00:00"
+    },
+    {
+      "length": 17420,
+      "segments": {
+        "dev": {
+          "end": 9471,
+          "first_time": "2016-11-25 23:00:00",
+          "last_time": "2017-07-30 14:00:00",
+          "start": 3551
+        },
+        "reserve": {
+          "end": 17420,
+          "first_time": "2018-03-13 01:00:00",
+          "last_time": "2018-06-26 19:00:00",
+          "start": 14881
+        },
+        "sealed": {
+          "end": 14713,
+          "first_time": "2017-08-06 15:00:00",
+          "last_time": "2018-03-06 00:00:00",
+          "start": 9639
+        },
+        "warmup": {
+          "end": 3383,
+          "first_time": "2016-07-01 00:00:00",
+          "last_time": "2016-11-18 22:00:00",
+          "start": 0
+        }
+      },
+      "series_id": "etth1/MULL",
+      "start": "2016-07-01 00:00:00"
+    },
+    {
+      "length": 17420,
+      "segments": {
+        "dev": {
+          "end": 9471,
+          "first_time": "2016-11-25 23:00:00",
+          "last_time": "2017-07-30 14:00:00",
+          "start": 3551
+        },
+        "reserve": {
+          "end": 17420,
+          "first_time": "2018-03-13 01:00:00",
+          "last_time": "2018-06-26 19:00:00",
+          "start": 14881
+        },
+        "sealed": {
+          "end": 14713,
+          "first_time": "2017-08-06 15:00:00",
+          "last_time": "2018-03-06 00:00:00",
+          "start": 9639
+        },
+        "warmup": {
+          "end": 3383,
+          "first_time": "2016-07-01 00:00:00",
+          "last_time": "2016-11-18 22:00:00",
+          "start": 0
+        }
+      },
+      "series_id": "etth1/LUFL",
+      "start": "2016-07-01 00:00:00"
+    },
+    {
+      "length": 17420,
+      "segments": {
+        "dev": {
+          "end": 9471,
+          "first_time": "2016-11-25 23:00:00",
+          "last_time": "2017-07-30 14:00:00",
+          "start": 3551
+        },
+        "reserve": {
+          "end": 17420,
+          "first_time": "2018-03-13 01:00:00",
+          "last_time": "2018-06-26 19:00:00",
+          "start": 14881
+        },
+        "sealed": {
+          "end": 14713,
+          "first_time": "2017-08-06 15:00:00",
+          "last_time": "2018-03-06 00:00:00",
+          "start": 9639
+        },
+        "warmup": {
+          "end": 3383,
+          "first_time": "2016-07-01 00:00:00",
+          "last_time": "2016-11-18 22:00:00",
+          "start": 0
+        }
+      },
+      "series_id": "etth1/LULL",
+      "start": "2016-07-01 00:00:00"
+    },
+    {
+      "length": 17420,
+      "segments": {
+        "dev": {
+          "end": 9471,
+          "first_time": "2016-11-25 23:00:00",
+          "last_time": "2017-07-30 14:00:00",
+          "start": 3551
+        },
+        "reserve": {
+          "end": 17420,
+          "first_time": "2018-03-13 01:00:00",
+          "last_time": "2018-06-26 19:00:00",
+          "start": 14881
+        },
+        "sealed": {
+          "end": 14713,
+          "first_time": "2017-08-06 15:00:00",
+          "last_time": "2018-03-06 00:00:00",
+          "start": 9639
+        },
+        "warmup": {
+          "end": 3383,
+          "first_time": "2016-07-01 00:00:00",
+          "last_time": "2016-11-18 22:00:00",
+          "start": 0
+        }
+      },
+      "series_id": "etth1/OT",
+      "start": "2016-07-01 00:00:00"
+    }
+  ],
+  "split_percent": [
+    20,
+    35,
+    30
+  ]
+}

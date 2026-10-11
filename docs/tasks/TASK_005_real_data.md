@@ -1,4 +1,4 @@
-Status: active
+Status: done
 
 # Task 005: Real data (ETTh1 + ECL subset): fetch, manifests, chronological splits
 

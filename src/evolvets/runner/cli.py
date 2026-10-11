@@ -8,8 +8,14 @@ from pathlib import Path
 
 from evolvets import __version__
 from evolvets.arena.realdata import sources
-from evolvets.arena.realdata.fetch import FetchError, fetch, verify_raw
+from evolvets.arena.realdata.fetch import FetchError, fetch, file_sha256, verify_raw
 from evolvets.arena.realdata.manifest import ManifestError, RawManifest
+from evolvets.arena.realdata.prepare import (
+    PrepareError,
+    prepare,
+    read_split_manifest,
+    splits_manifest_path,
+)
 from evolvets.ledger.store import LedgerLockedError, LedgerReader, LedgerWriter
 from evolvets.ledger.validate import validate_run
 
@@ -38,7 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     data_sub = data.add_subparsers(dest="data_command", metavar="DATA-COMMAND")
     for name, help_text in (
         ("fetch", "download and pin the raw data files"),
-        ("verify", "verify raw data files against their manifests"),
+        ("verify", "verify raw (and processed) files against their manifests"),
+        ("prepare", "build processed files and split manifests from the raw files"),
     ):
         command = data_sub.add_parser(name, help=help_text)
         command.add_argument(
@@ -86,17 +93,41 @@ def _cmd_ledger_unlock(root: str, run_id: str, stream: str) -> int:
     return 0
 
 
+def _verify_processed(name: str, data_root: Path, manifest_dir: Path) -> None:
+    """Check both processed files against the split manifest, if one exists."""
+    if not splits_manifest_path(manifest_dir, name).exists():
+        return
+    spec = read_split_manifest(manifest_dir, name)
+    for label, expected in (("public", spec.public_sha256), ("sealed", spec.sealed_sha256)):
+        processed = data_root / "processed" / f"{name}.{label}.json"
+        if not processed.exists():
+            raise PrepareError(f"{processed} is missing; run 'evolvets data prepare {name}'")
+        digest, _ = file_sha256(processed)
+        if digest != expected:
+            raise PrepareError(
+                f"{processed} does not match the split manifest: file sha256 {digest}, "
+                f"manifest sha256 {expected}"
+            )
+
+
 def _cmd_data(action: str, dataset: str, data_root: str, manifest_dir: str) -> int:
-    """Fetch or verify each requested dataset, one OK/FAIL line per dataset."""
+    """Fetch, prepare or verify each requested dataset, one OK/FAIL line per dataset."""
     failed = False
+    root, manifests = Path(data_root), Path(manifest_dir)
     for name in _selected_datasets(dataset):
         try:
+            if action == "prepare":
+                prepare(name, root, manifests)
+                spec = read_split_manifest(manifests, name)
+                print(f"OK {name}: {len(spec.series)} series, processed {spec.public_sha256}")
+                continue
             source = sources.SOURCES[name]
             if action == "fetch":
-                manifest: RawManifest = fetch(source, Path(data_root), Path(manifest_dir))
+                manifest: RawManifest = fetch(source, root, manifests)
             else:
-                manifest = verify_raw(source, Path(data_root), Path(manifest_dir))
-        except (FetchError, ManifestError, OSError) as exc:
+                manifest = verify_raw(source, root, manifests)
+                _verify_processed(name, root, manifests)
+        except (FetchError, ManifestError, PrepareError, ValueError, OSError) as exc:
             failed = True
             print(f"FAIL {name}: {exc}")
         else:
@@ -116,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
     if args.command == "data":
-        if args.data_command in ("fetch", "verify"):
+        if args.data_command in ("fetch", "verify", "prepare"):
             return _cmd_data(args.data_command, args.dataset, args.data_root, args.manifest_dir)
         parser.print_help()
         return 0

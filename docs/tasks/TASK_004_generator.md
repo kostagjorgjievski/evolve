@@ -33,7 +33,7 @@ Defines a world exactly, simulates it, and computes the true-best forecast. No r
 @dataclass(frozen=True)
 class Regime:
     start: int  # first index where this regime is active
-    level: float
+    level: float  # trend value at `start`
     slope: float  # per step, measured from `start`
     season_amp: float  # >= 0
     season_phase: float  # radians, 0 <= phase < 2*pi
@@ -67,7 +67,7 @@ def spec_to_dict(spec: WorldSpec) -> dict[str, Any]: ...  # JSON-ready, for hash
 1. `regimes` non-empty; `regimes[0].start == 0`, `transition == "sudden"`, `ramp == 0`, `recurs_from is None`.
 2. Starts strictly increasing and all `< length`.
 3. For a gradual regime `r`, `start_r + ramp_r <= start_{r+1}` (or `<= length` for the last regime). A ramp may not overlap the next change.
-4. `recurs_from`, if set, is a smaller index, and the regime's `level`, `slope`, `season_amp`, `season_phase`, `ar_phi`, `sigma` equal the referenced regime's exactly.
+4. `recurs_from`, if set, is a smaller index. The regime's `slope`, `season_amp`, `season_phase`, `ar_phi` and `sigma` equal the referenced regime's exactly, and its `level` equals `level_a + slope_a * (start_r - start_a)` exactly (the same float expression), where `a` is the referenced regime. A recurring regime therefore reproduces regime a's original mean function `m_a` exactly, re-entered at its own start; the jump back onto a's trend line is the recorded `recurrence` change point, not a hidden level shift.
 5. Bursts sorted by `start`, non-overlapping, each inside `[0, length)` (`start + length <= length` of the world).
 6. Booleans are not accepted where ints are expected (`True` is not a valid `start`).
 
@@ -120,7 +120,7 @@ def true_best_error_variance(world: World, origin: int, horizon: int) -> tuple[f
 
 ### Tests for PR A (all required; `tests/arena/test_synthetic_core.py`, `test_synthetic_oracle.py`)
 
-1. Each validation rule 1–6 above has a failing case that raises `WorldSpecError`, plus one valid multi-regime spec with a gradual ramp, a recurring regime and two bursts that constructs. Also: NaN or infinite `level`, `sigma <= 0`, `|ar_phi| >= 1`, `season_amp < 0`, `period < 2`, `length < 2`, `sigma_mult <= 1` each raise.
+1. Each validation rule 1–6 above has a failing case that raises `WorldSpecError` (for rule 4, two cases: a copied parameter that differs, and a recurring regime whose `level` is not exactly on the referenced regime's trend line), plus one valid multi-regime spec with a gradual ramp, a recurring regime and two bursts that constructs. Also: NaN or infinite `level`, `sigma <= 0`, `|ar_phi| >= 1`, `season_amp < 0`, `period < 2`, `length < 2`, `sigma_mult <= 1` each raise.
 2. `standard_normals`: same seed gives identical output; different seeds differ; negative seed, seed `>= 2**63` and a `bool` seed raise; `n = 0` returns `()`. Over `n = 200_000` with a fixed seed, sample mean is within 0.01 of 0 and sample variance within 0.02 of 1.
 3. `simulate_from_innovations` rejects a wrong-length `z` and a `z` containing NaN.
 4. Mean path, sudden change: at `start_r - 1` the mean equals `m_{r-1}`, at `start_r` it equals `m_r` (exact formula check at both indices).
@@ -207,20 +207,20 @@ def dev_tasks(
 - **Uniform draws**: a float in `[lo, hi]` is `lo + (hi - lo) * rng.random()`; an int in `[lo, hi]` is `lo + int(rng.random() * (hi - lo + 1))`, capped at `hi`. Nothing else consumes the RNG. The order of draws is the order written in the implementation and is pinned by the golden test.
 - **Base regime** (`start = 0`, sudden): level, slope, season amplitude, phase in `[0, 2*pi)`, phi, sigma, each drawn from its range.
 - **Placing `k` events** (change points or bursts): split `[warmup, length)` into `k` equal slots of width `w = (length - warmup) // k`. Event `i` is at `warmup + i*w + randint(0, w - min_segment)`. This guarantees gaps of at least `min_segment` and that every ramp (`< min_segment`) and burst (`< min_segment`) ends before the next event.
-- **Change kinds** (new regime copies the previous one, then changes only the named parameters):
-  - `level_shift`: `level += sign * shift * sigma / sqrt(1 - phi**2)`, `sign` is +1 or -1 with probability 1/2 (`rng.random() < 0.5`), `shift` from `shift_range`.
-  - `slope_change`: `slope` redrawn from `new_slope_range`.
-  - `season_change`: `season_amp` and `season_phase` redrawn.
-  - `noise_change`: `ar_phi` and `sigma` redrawn.
+- **Change kinds**. A new regime first copies the previous one and **re-anchors its level so the trend is continuous at the change point**: `level_r = level_{r-1} + slope_{r-1} * (start_r - start_{r-1})`, the previous trend line evaluated at `start_r`. Only then is the named kind applied, so no kind other than `level_shift` moves the trend component of the mean path:
+  - `level_shift`: `level += sign * shift * sigma / sqrt(1 - phi**2)`, with `sigma` and `phi` the previous regime's (this kind does not change them). `sign` is +1 or -1 with probability 1/2 (`rng.random() < 0.5`), `shift` from `shift_range`. The mean path's trend jumps by exactly the drawn shift; the re-anchored trend without the shift would have been continuous.
+  - `slope_change`: `slope` redrawn from `new_slope_range`. The trend is continuous at `start_r` and kinks onto the new slope from there.
+  - `season_change`: `season_amp` and `season_phase` redrawn. The trend is continuous; the seasonal term switches at `start_r` (it is a function of absolute `t`, so the new phase is visible immediately).
+  - `noise_change`: `ar_phi` and `sigma` redrawn. The mean path is entirely continuous.
 - **Families**:
   - `stationary`: one regime, no bursts, `change_kinds = ()`.
   - `sudden`: `k` from `1..max_changes`; each change has a kind drawn uniformly from `CHANGE_KINDS`; all transitions sudden.
   - `gradual`: as `sudden`, but every transition is gradual with `ramp` from `ramp_range`.
-  - `recurring`: draw base regime A and a second regime B (B is A after one drawn change kind). `k` from `2..max(2, max_changes)`. Regimes alternate A, B, A, B, ...; every regime after the first two has `recurs_from` set to 0 or 1 and copies its parameters exactly. All transitions sudden. `change_kinds[0]` is B's kind; the rest are `"recurrence"`.
+  - `recurring`: draw base regime A and a second regime B (B is built from A at `start_1` by the re-anchoring rule above plus one drawn change kind). `k` from `2..max(2, max_changes)`. Regimes alternate A, B, A, B, ...; every regime after the first two has `recurs_from` set to 0 or 1, copies that regime's `slope`, `season_amp`, `season_phase`, `ar_phi`, `sigma` exactly, and takes `level = level_a + slope_a * (start_r - start_a)` per rule 4. Each recurrence therefore reproduces regime a's original mean function exactly — the world returns to that regime's own trend line, and the jump back is the recorded `recurrence` change point. All transitions sudden. `change_kinds[0]` is B's kind; the rest are `"recurrence"`.
   - `false_drift`: one regime; `1..max_bursts` bursts placed by the slotting rule, each with length and multiplier from their ranges. `change_kinds = ()`.
-  - `mixed`: as `sudden`, but each transition is independently sudden or gradual (probability 1/2), plus `0..max_bursts` bursts. Burst slots are computed independently of change slots, so a burst may coincide with a change. That is intended.
-- `make_task(family, seed, config)`: unknown family raises `GrammarError`. Uses two independent sub-seeds: `spec_seed` and `noise_seed`, each the first 8 bytes (big-endian, top bit cleared) of `SHA-256(b"evolvets/generator/v1/" + label + b"/" + str(seed).encode())` with label `b"spec"` or `b"noise"`. `sample_spec(family, random.Random(spec_seed), config)`, then `simulate(spec, noise_seed)`. Same seed gives the same task.
-- **Pools and seed secrecy**. Dev and sealed tasks come from disjoint, domain-separated seed spaces. `world_seed(pool, family, index, salt)` is the first 8 bytes (top bit cleared) of `SHA-256(b"evolvets/generator/v1\x00" + pool + b"\x00" + family + b"\x00" + str(index) + b"\x00" + salt)`.
+  - `mixed`: as `sudden`, but each transition is independently sudden or gradual (probability 1/2), plus `0..max_bursts` bursts. A drawn burst count of `k = 0` places nothing: the slotting rule is not applied at all (no division, no draws from the RNG), so the draw order stays well-defined. Burst slots are computed independently of change slots, so a burst may coincide with a change. That is intended.
+- `make_task(family, seed, config)`: unknown family raises `GrammarError`. `seed` must be an int in `[0, 2**63)`, else `ValueError`; bools are rejected (same rule as `standard_normals`, and `world_seed` outputs always qualify). Uses two independent sub-seeds: `spec_seed` and `noise_seed`, each `int.from_bytes(SHA-256(b"evolvets/generator/v1/" + label + b"/" + str(seed).encode("utf-8")).digest()[:8], "big") & (2**63 - 1)` with label `b"spec"` or `b"noise"`. `sample_spec(family, random.Random(spec_seed), config)`, then `simulate(spec, noise_seed)`. Same seed gives the same task.
+- **Pools and seed secrecy**. Dev and sealed tasks come from disjoint, domain-separated seed spaces. `world_seed(pool, family, index, salt)` is `int.from_bytes(SHA-256(b"evolvets/generator/v1\x00" + pool.encode("utf-8") + b"\x00" + family.encode("utf-8") + b"\x00" + str(index).encode("utf-8") + b"\x00" + salt).digest()[:8], "big") & (2**63 - 1)`, an int in `[0, 2**63)`.
   - `pool == "dev"`: `salt` must be empty, else `ValueError`. Dev tasks are public and reproducible from the repo.
   - `pool == "sealed"`: `salt` must be at least 32 bytes, else `ValueError`. Without the salt, sealed tasks cannot be regenerated from the repository, even though the grammar is public. This task does not create, store or read any salt. Where the sealed salt lives, and how it is committed to and later revealed so sealed results stay reproducible from the ledger, is decided in the PR 9 (`feat/arena-sealed`) spec.
   - Unknown pool or family, negative or `bool` index raise `ValueError`.
@@ -229,9 +229,12 @@ def dev_tasks(
 ### Tests for PR B (all required; `tests/arena/test_synthetic_grammar.py`, `test_synthetic_seeds.py`)
 
 1. For every family and 200 seeds each, `make_task` succeeds (so every sampled spec passed `WorldSpec` validation) and `len(change_kinds) == len(world.change_points)`.
-2. Family structure, checked over 50 seeds per family: `stationary` has one regime and no bursts; `sudden` has 1..3 changes, all sudden; `gradual` has all transitions gradual with ramps in `ramp_range`; `recurring` alternates A/B with `recurs_from` pointing at 0 or 1 and matching parameters exactly, kinds `[<kind>, "recurrence", ...]`; `false_drift` has one regime and 1..3 bursts; `mixed` has 1..3 changes and 0..3 bursts.
+2. Family structure, checked over 50 seeds per family: `stationary` has one regime and no bursts; `sudden` has 1..3 changes, all sudden; `gradual` has all transitions gradual with ramps in `ramp_range`; `recurring` alternates A/B with `recurs_from` pointing at 0 or 1, the five copied parameters matching exactly and `level` exactly on the referenced regime's trend line, and from each recurrence on `mean` equals the referenced regime's original mean function exactly, kinds `[<kind>, "recurrence", ...]`; `false_drift` has one regime and 1..3 bursts; `mixed` has 1..3 changes and 0..3 bursts.
 3. Placement: over the same tasks, every change point and burst start is `>= warmup`; consecutive change points are at least `min_segment` apart; consecutive bursts likewise.
-4. Change kinds change only their parameters: for each change in `sudden` tasks, comparing regime `r` with `r - 1`, exactly the parameters named by its kind differ (with `level_shift` magnitude within `shift_range` in stationary-noise units).
+4. Change kinds and the mean path: for each change in `sudden` tasks, let `trend(t) = mu_t - season_{r(t)}(t)` (mean minus the active regime's seasonal term, from the spec). Check `trend(start_r) - trend(start_r - 1)`:
+   - for `slope_change`, `season_change` and `noise_change` it equals `slope_{r-1}` within `1e-9` — the trend is continuous across the change, advancing by exactly one step of the old slope;
+   - for `level_shift` the excess over `slope_{r-1}` has magnitude within `shift_range` in stationary-noise units of regime `r - 1` (`sigma_{r-1} / sqrt(1 - phi_{r-1}**2)`).
+   Also, after accounting for the re-anchored level (compare `level_r - slope_{r-1} * (start_r - start_{r-1})` against `level_{r-1}`, and for `level_shift` subtract the drawn shift from `level_r` first), exactly the parameters named by the kind differ from regime `r - 1`.
 5. `make_task` is deterministic, and different seeds give different fingerprints.
 6. Golden fingerprints: `make_task(f, world_seed("dev", f, 0))` for every family has a pinned fingerprint string in the test file. The docstring says changing them requires bumping `GENERATOR_VERSION`.
 7. `GrammarConfig` validation: each rule above has a failing case; the default config constructs.

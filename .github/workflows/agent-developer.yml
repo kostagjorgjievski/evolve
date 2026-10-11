@@ -1,0 +1,96 @@
+name: Agent - developer
+
+# Wakes the developer agent when there is development work to do. The agent
+# is stateless: on every run it re-derives the next action from repository
+# state (docs/agents/developer.md), so a missed or merged trigger is harmless.
+
+on:
+  push:
+    branches: [main]
+  issue_comment:
+    types: [created]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  schedule:
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: agent-developer
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    if: >-
+      vars.AGENTS_PAUSED != 'true' && (
+        github.event_name == 'push' ||
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+          contains(github.event.comment.body, '<!-- agent:changes-requested')) ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' &&
+          github.event.workflow_run.conclusion == 'failure')
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.guard.outputs.proceed }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: guard
+        env:
+          GH_TOKEN: ${{ secrets.AGENTS_GH_TOKEN }}
+          AGENTS_DAILY_RUN_CAP: ${{ vars.AGENTS_DAILY_RUN_CAP }}
+        run: bash .github/scripts/agent-guard.sh
+
+  develop:
+    needs: guard
+    if: needs.guard.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ secrets.AGENTS_GH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.AGENTS_GH_TOKEN }}
+      - uses: astral-sh/setup-uv@v5
+      - name: Set up Python
+        run: uv python install 3.11
+      - name: Git identity
+        run: |
+          git config user.name "evolvets-developer-agent"
+          git config user.email "noreply@anthropic.com"
+      # The developer is GLM (Zhipu bigmodel.cn), run through Claude Code's agent
+      # harness via the Anthropic-compatible endpoint. Reviewer and planner run
+      # on Claude. Override the endpoint with the DEV_BASE_URL repo variable.
+      - uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ vars.DEV_BASE_URL || 'https://open.bigmodel.cn/api/anthropic' }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ZAI_API_KEY }}
+          API_TIMEOUT_MS: "3000000"
+          # Closest equivalent of maximum reasoning effort in Claude Code.
+          MAX_THINKING_TOKENS: ${{ vars.DEV_MAX_THINKING_TOKENS || '32000' }}
+          ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.DEV_MODEL || 'glm-5.3' }}
+          ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.DEV_MODEL || 'glm-5.3' }}
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.DEV_MODEL || 'glm-5.3' }}
+        with:
+          anthropic_api_key: ${{ secrets.ZAI_API_KEY }}
+          github_token: ${{ secrets.AGENTS_GH_TOKEN }}
+          prompt: |
+            You are the DEVELOPER agent for this repository. Read docs/agents/developer.md
+            and follow it exactly. It tells you how to work out, from repository state alone,
+            what to do on this run, and when to do nothing.
+
+            Trigger for this run (a hint only; always re-derive state yourself):
+            - event: ${{ github.event_name }}
+            - pull request from a comment, if any: ${{ github.event.issue.number }}
+            - failed CI branch, if any: ${{ github.event.workflow_run.head_branch }}
+          claude_args: |
+            --model ${{ vars.DEV_MODEL || 'glm-5.3' }}
+            --max-turns 150
+            --allowedTools "Bash,Read,Write,Edit,Glob,Grep"

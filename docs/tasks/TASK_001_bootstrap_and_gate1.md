@@ -1,3 +1,5 @@
+Status: superseded (PR 1 merged as #1; PRs 2-5 replaced by TASK_002 and docs/ROADMAP.md)
+
 # Task 001 — Bootstrap EvolveTS and reach Gate 1
 
 Read `AGENTS.md` first. It contains the git, PR and research-integrity rules for this task.

@@ -1,0 +1,72 @@
+name: Agent - reviewer
+
+# Wakes the reviewer agent when a PR's CI has passed. The agent is stateless:
+# it reviews every open PR whose current head has passing CI and no verdict
+# yet (docs/agents/reviewer.md).
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  schedule:
+    - cron: "47 */2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: agent-reviewer
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    if: >-
+      vars.AGENTS_PAUSED != 'true' && (
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' &&
+          github.event.workflow_run.conclusion == 'success')
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.guard.outputs.proceed }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: guard
+        env:
+          GH_TOKEN: ${{ secrets.AGENTS_GH_TOKEN }}
+          AGENTS_DAILY_RUN_CAP: ${{ vars.AGENTS_DAILY_RUN_CAP }}
+        run: bash .github/scripts/agent-guard.sh
+
+  review:
+    needs: guard
+    if: needs.guard.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ secrets.AGENTS_GH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.AGENTS_GH_TOKEN }}
+      - uses: astral-sh/setup-uv@v5
+      - name: Set up Python
+        run: uv python install 3.11
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.AGENTS_GH_TOKEN }}
+          prompt: |
+            You are the REVIEWER agent for this repository. Read docs/agents/reviewer.md
+            and follow it exactly. You never write feature code; you review, probe, and
+            either squash-merge or request changes.
+
+            Trigger for this run (a hint only; always re-derive state yourself):
+            - event: ${{ github.event_name }}
+            - branch whose CI just passed, if any: ${{ github.event.workflow_run.head_branch }}
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 100
+            --allowedTools "Bash,Read,Write,Edit,Glob,Grep"

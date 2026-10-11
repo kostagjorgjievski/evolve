@@ -45,8 +45,17 @@ def _fit_reference(values, t, period, window, ridge):
     """Fit (mu, sd, w) exactly as the spec prescribes, but with the test's own code."""
     m, fit_len = period, window + 2 * period
     data = values[t - fit_len + 1 : t + 1]
-    mu = sum(data) / len(data)
-    sd = math.sqrt(sum((v - mu) ** 2 for v in data) / len(data))
+    # Left-to-right loops, never builtin sum(): sum() switched to compensated
+    # summation for floats in Python 3.12, so an exact == against the
+    # implementation would depend on the interpreter version.
+    mu = 0.0
+    for v in data:
+        mu = mu + v
+    mu = mu / len(data)
+    sq = 0.0
+    for v in data:
+        sq = sq + (v - mu) * (v - mu)
+    sd = math.sqrt(sq / len(data))
     if sd == 0.0:
         sd = 1.0
     z = {(t - fit_len + 1 + i): (v - mu) / sd for i, v in enumerate(data)}
@@ -59,10 +68,16 @@ def _fit_reference(values, t, period, window, ridge):
     for s in range(t - window + 1, t + 1):
         rows.append([1.0, z_at(s - 1), z_at(s - 2), z_at(s - 3), z_at(s - m), z_at(s - 2 * m)])
         targets.append(z_at(s))
-    a = [[sum(row[i] * row[j] for row in rows) for j in range(6)] for i in range(6)]
+    # Accumulate row by row, in the same order as the implementation.
+    a = [[0.0] * 6 for _ in range(6)]
+    b = [0.0] * 6
+    for row, target in zip(rows, targets, strict=True):
+        for i in range(6):
+            b[i] = b[i] + row[i] * target
+            for j in range(6):
+                a[i][j] = a[i][j] + row[i] * row[j]
     for i in range(1, 6):
         a[i][i] += ridge
-    b = [sum(row[i] * target for row, target in zip(rows, targets, strict=True)) for i in range(6)]
     return mu, sd, _solve_gauss_jordan(a, b)
 
 

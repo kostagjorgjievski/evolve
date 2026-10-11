@@ -9,14 +9,21 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
         args: ["--maxkb=500"]
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
-    hooks:
-      - id: ruff
-        args: ["--fix"]
-      - id: ruff-format
+  # All Python tooling runs through uv so pre-commit and CI always use the
+  # same resolved versions (ruff>=0.6 etc.), instead of pinning a remote
+  # hook repo to a version that can drift from CI.
   - repo: local
     hooks:
+      - id: ruff
+        name: ruff
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff-format
+        entry: uv run ruff format
+        language: system
+        types: [python]
       - id: mypy
         name: mypy
         entry: uv run mypy

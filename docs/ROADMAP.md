@@ -23,8 +23,8 @@ Goal: answer question 1 and have every piece of measurement infrastructure froze
 | 4 | `feat/ledger-blobs` | Content-addressed blob store, ordering validator, `evolvets ledger verify` | merged (#5) |
 | 4b | `feat/requires-predictions` | Explicit `requires_predictions` in `run_start`; PR #5 review nits; then human tags `ledger-schema-v1` | merged (#13) |
 | 5 | `feat/generator-core` + `feat/generator-grammar` | Synthetic world/system mismatch grammar with true-best forecast per world | merged (#18, #19) |
-| 6 | `feat/real-data` | ETTh1 + ECL subset download, manifests, chronological splits | TASK_005 |
-| 7 | `feat/experts-cache` | Five simple experts, look-ahead-safe; prediction cache | spec pending |
+| 6 | `feat/real-data` | ETTh1 + ECL subset download, manifests, chronological splits | merged (#22, #23, #24) |
+| 7 | `feat/experts-cache` | Five simple experts, look-ahead-safe; prediction cache | TASK_006 |
 | 8 | `feat/arena-replay` | Replay loop, horizon-aware label release, metrics | spec pending |
 | 9 | `feat/arena-sealed` | Sealed/live pools in a separate process; scores written straight to the sealed ledger stream | spec pending |
 | 10 | `feat/updater-baselines` | Updater interface; equal, FTL, Hedge, Fixed-Share, AdaHedge; oracles | spec pending |

@@ -33,10 +33,11 @@ def mk(
     )
 
 
-def run_start(at, limits=None, record_id=None, stream="main", seq=0):
+def run_start(at, limits=None, record_id=None, stream="main", seq=0, requires_predictions=True):
     payload = RunStart(
         condition="c",
         seed=1,
+        requires_predictions=requires_predictions,
         config_blob=BLOB,
         git_commit="abc",
         protocol_versions={"ledger": "1.0", "arena": "0", "generator": "0", "cache_manifest": "0"},
@@ -187,14 +188,20 @@ def test_cross_stream_prediction_after_evaluation_passes():
 def test_budget_limit_enforced():
     limits = Budget(evaluations=1)
     spendy = proposal("2026-10-11T11:00:01.000000Z", 1, budget=Budget(evaluations=2))
-    records = [run_start("2026-10-11T11:00:00.000000Z", limits=limits), spendy]
+    records = [
+        run_start("2026-10-11T11:00:00.000000Z", limits=limits, requires_predictions=False),
+        spendy,
+    ]
     assert any("budget evaluations exceeded" in v for v in validate_run(records))
 
 
 def test_budget_within_limit_passes():
     limits = Budget(evaluations=2)
     spendy = proposal("2026-10-11T11:00:01.000000Z", 1, budget=Budget(evaluations=1))
-    records = [run_start("2026-10-11T11:00:00.000000Z", limits=limits), spendy]
+    records = [
+        run_start("2026-10-11T11:00:00.000000Z", limits=limits, requires_predictions=False),
+        spendy,
+    ]
     assert validate_run(records) == []
 
 
@@ -216,7 +223,7 @@ def test_prediction_must_refer_to_a_proposal():
 
 
 def test_evaluation_must_refer_to_a_proposal():
-    start = run_start("2026-10-11T11:00:00.000000Z")
+    start = run_start("2026-10-11T11:00:00.000000Z", requires_predictions=False)
     records = [
         start,
         proposal("2026-10-11T11:00:01.000000Z", 1),
@@ -225,6 +232,38 @@ def test_evaluation_must_refer_to_a_proposal():
     assert any(
         "evaluation at seq 2 does not refer to a proposal" in v for v in validate_run(records)
     )
+
+
+def test_required_prediction_missing_detected():
+    """The case auto-detection could not catch: the rule comes from the flag."""
+    p = proposal("2026-10-11T11:00:01.000000Z", 1)
+    e = evaluation("2026-10-11T11:00:02.000000Z", 2, p.record_id)
+    records = [run_start("2026-10-11T11:00:00.000000Z"), p, e]
+    assert any("no prediction logged before it" in v for v in validate_run(records))
+
+
+def test_requires_predictions_false_without_predictions_clean():
+    p = proposal("2026-10-11T11:00:01.000000Z", 1)
+    e = evaluation("2026-10-11T11:00:02.000000Z", 2, p.record_id)
+    records = [run_start("2026-10-11T11:00:00.000000Z", requires_predictions=False), p, e]
+    assert validate_run(records) == []
+
+
+def test_requires_predictions_false_rejects_prediction():
+    p = proposal("2026-10-11T11:00:01.000000Z", 1)
+    pred = prediction("2026-10-11T11:00:02.000000Z", 2, p.record_id)
+    records = [run_start("2026-10-11T11:00:00.000000Z", requires_predictions=False), p, pred]
+    violations = validate_run(records)
+    assert any(
+        "prediction at seq 2 in a run that declares requires_predictions=false" in v
+        for v in violations
+    )
+
+
+def test_no_run_start_reports_violation_without_raising():
+    records = [proposal("2026-10-11T11:00:01.000000Z", 0)]
+    violations = validate_run(records)
+    assert any("first record of main must be run_start" in v for v in violations)
 
 
 def test_cross_stream_prediction_with_equal_timestamp_rejected():

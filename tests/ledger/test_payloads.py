@@ -107,6 +107,7 @@ def test_bad_blob_ref_rejected():
         RunStart(
             condition="c",
             seed=1,
+            requires_predictions=True,
             config_blob="sha256:tooshort",
             git_commit="abc",
             protocol_versions=dict(PROTOCOL_VERSIONS),
@@ -119,6 +120,7 @@ def test_protocol_versions_key_set_enforced():
         RunStart(
             condition="c",
             seed=1,
+            requires_predictions=True,
             config_blob="sha256:" + "0" * 64,
             git_commit="abc",
             protocol_versions={"ledger": "1.0"},
@@ -136,8 +138,46 @@ def test_seed_must_be_int():
         RunStart(
             condition="c",
             seed="seven",
+            requires_predictions=True,
             config_blob="sha256:" + "0" * 64,
             git_commit="abc",
             protocol_versions=dict(PROTOCOL_VERSIONS),
             budget_limits=Budget(),
         )
+
+
+def test_requires_predictions_must_be_present(run_start):
+    data = payload_to_dict(run_start)
+    del data["requires_predictions"]
+    with pytest.raises(PayloadError, match="missing fields"):
+        payload_from_dict("run_start", data)
+
+
+@pytest.mark.parametrize("bad", [1, "true", None])
+def test_requires_predictions_must_be_bool(bad):
+    with pytest.raises(PayloadError, match="requires_predictions"):
+        RunStart(
+            condition="c",
+            seed=1,
+            requires_predictions=bad,
+            config_blob="sha256:" + "0" * 64,
+            git_commit="abc",
+            protocol_versions=dict(PROTOCOL_VERSIONS),
+            budget_limits=Budget(),
+        )
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_requires_predictions_round_trips(flag):
+    payload = RunStart(
+        condition="c",
+        seed=1,
+        requires_predictions=flag,
+        config_blob="sha256:" + "0" * 64,
+        git_commit="abc",
+        protocol_versions=dict(PROTOCOL_VERSIONS),
+        budget_limits=Budget(),
+    )
+    data = payload_to_dict(payload)
+    assert data["requires_predictions"] is flag
+    assert payload_from_dict("run_start", data) == payload

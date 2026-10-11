@@ -51,14 +51,15 @@ class BlobStore:
     def put(self, data: bytes) -> str:
         """Store ``data`` atomically and return its ``sha256:...`` reference.
 
-        Writing content whose blob is already stored intact is a no-op that
-        returns the same reference; a corrupted existing blob file is
-        atomically replaced with the correct content.
+        An existing target file is re-hashed: when it still hashes to its
+        own reference the put is a no-op returning that reference; when it
+        does not (the file was corrupted), it is atomically replaced with
+        the correct content.
         """
         digest = hashlib.sha256(data).hexdigest()
         ref = f"sha256:{digest}"
         path = self._dir / digest[:2] / digest
-        if path.exists() and path.read_bytes() == data:
+        if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == digest:
             return ref
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_name(f"{digest}.tmp-{os.getpid()}-{uuid.uuid4().hex}")

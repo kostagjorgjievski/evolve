@@ -53,6 +53,7 @@ def run_start(budget_limits, blob_ref):
     return RunStart(
         condition="baseline-hedge",
         seed=7,
+        requires_predictions=True,
         config_blob=blob_ref("config"),
         git_commit="abc123",
         protocol_versions=dict(PROTOCOL_VERSIONS),

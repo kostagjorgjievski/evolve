@@ -4,6 +4,8 @@
 # the workflow itself; this script handles the remaining stop conditions:
 #   1. any open issue labelled `needs-human` pauses every agent;
 #   2. a daily cap on event-triggered agent runs (AGENTS_DAILY_RUN_CAP, default 40).
+#      Runs skipped by the workflow's trigger filter don't count; only runs
+#      that passed the filter and reached this guard do.
 set -euo pipefail
 
 repo="${GITHUB_REPOSITORY:?}"
@@ -35,7 +37,7 @@ today=$(date -u +%Y-%m-%d)
 runs=0
 for wf in agent-developer.yml agent-reviewer.yml agent-planner.yml; do
   if ! n=$(gh api "repos/${repo}/actions/workflows/${wf}/runs?created=>=${today}&per_page=100" \
-        --jq '[.workflow_runs[] | select(.event != "schedule")] | length' 2>&1); then
+        --jq '[.workflow_runs[] | select(.event != "schedule" and .conclusion != "skipped")] | length' 2>&1); then
     fail "Could not count today's runs of ${wf} (AGENTS_GH_TOKEN needs Actions: read), so the daily cap can't be enforced: ${n}"
   fi
   runs=$((runs + n))

@@ -20,10 +20,38 @@ PROTOCOL_VERSIONS = {
 }
 
 
-@pytest.mark.parametrize("kind", ["run_start", "run_end"])
+ALL_KINDS = [
+    "run_start",
+    "run_end",
+    "proposal",
+    "prediction",
+    "allocation",
+    "evaluation",
+    "acceptance",
+    "baseline",
+    "commitment",
+    "correction",
+]
+
+
+@pytest.mark.parametrize("kind", ALL_KINDS)
 def test_round_trip(kind, request):
     payload = request.getfixturevalue(kind)
     assert payload_from_dict(kind, payload_to_dict(payload)) == payload
+
+
+@pytest.mark.parametrize("kind", ALL_KINDS[2:])
+def test_unknown_and_missing_fields_rejected(kind, request):
+    payload = request.getfixturevalue(kind)
+    data = payload_to_dict(payload)
+    extra = dict(data)
+    extra["mystery"] = 1
+    with pytest.raises(PayloadError, match="unknown fields"):
+        payload_from_dict(kind, extra)
+    short = dict(data)
+    short.pop(next(iter(short)))
+    with pytest.raises(PayloadError, match="missing fields"):
+        payload_from_dict(kind, short)
 
 
 def test_validate_kind_payload_accepts_matching(run_start):

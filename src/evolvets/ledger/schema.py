@@ -48,6 +48,14 @@ _BUDGET_FIELDS = (
     "gpu_seconds",
     "evaluations",
 )
+# Kinds that must link to a fixed number of earlier records; existence and
+# direction of the links are checked by the ordering validator (PR C).
+REQUIRED_REFERS_TO = {
+    "prediction": 1,
+    "evaluation": 1,
+    "acceptance": 2,
+    "correction": 1,
+}
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _CREATED_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
 
@@ -124,6 +132,12 @@ class Record:
         from evolvets.ledger.payloads import validate_kind_payload  # avoids import cycle
 
         validate_kind_payload(self.kind, self.payload)
+        required_refs = REQUIRED_REFERS_TO.get(self.kind)
+        if required_refs is not None and len(self.refers_to) != required_refs:
+            raise RecordError(
+                f"{self.kind} must refer to exactly {required_refs} record(s), "
+                f"got {len(self.refers_to)}"
+            )
         pool = getattr(self.payload, "pool", None)
         if pool is not None and pool != "dev" and self.stream != "sealed":
             raise RecordError(f"{self.kind} with pool {pool!r} is valid only in the sealed stream")

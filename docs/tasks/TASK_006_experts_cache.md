@@ -1,4 +1,4 @@
-Status: active
+Status: done (PR A merged as #28; PR B split during review: store merged as #29, datasets + CLI in feat/experts-cache-cli)
 
 # Task 006: Five simple experts and the prediction cache
 

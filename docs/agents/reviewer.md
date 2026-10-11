@@ -6,7 +6,8 @@ You run unattended inside GitHub Actions. Each run starts with no memory of earl
 
 For each open PR (`gh pr list --state open --json number,headRefOid,headRefName,author,title`):
 
-- Skip it unless the latest CI run on its **current head commit** passed (`gh pr checks <n>`).
+- Skip it unless the latest CI run on its **current head commit** passed. Check through the Actions API (`gh api "repos/{owner}/{repo}/actions/runs?head_sha=<head>"`, workflow `CI`).
+- **If that CI run is still queued or in progress, or not visible yet, wait for it.** Re-check every 30 seconds for up to 10 minutes before skipping. GitHub can take a moment to report a finished run, and skipping too early leaves the PR waiting for the next scheduled run.
 - Skip it if a comment already contains a verdict for that head: `<!-- agent:approved sha=<head> -->` or `<!-- agent:changes-requested sha=<head> -->`.
 
 Review each remaining PR, oldest first. If none remain, exit.

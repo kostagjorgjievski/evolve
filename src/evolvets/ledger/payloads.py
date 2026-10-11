@@ -148,6 +148,7 @@ class RunStart:
 
     condition: str
     seed: int
+    requires_predictions: bool
     config_blob: str
     git_commit: str
     protocol_versions: dict[str, str]
@@ -156,6 +157,7 @@ class RunStart:
     def __post_init__(self) -> None:
         _require_nonempty_str("condition", self.condition)
         _require_int("seed", self.seed)
+        _require_bool("requires_predictions", self.requires_predictions)
         _require_blob_ref("config_blob", self.config_blob)
         _require_nonempty_str("git_commit", self.git_commit)
         _require_exact_keys("protocol_versions", self.protocol_versions, PROTOCOL_KEYS)

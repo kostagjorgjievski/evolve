@@ -22,13 +22,16 @@ _BUDGET_FIELDS = (
 )
 
 
-def validate_run(records: Sequence[Record], uses_predictions: bool | None = None) -> list[str]:
+def validate_run(records: Sequence[Record]) -> list[str]:
     """Return every ordering violation found in one run's records.
 
     ``records`` should cover both streams (``LedgerReader.records()`` order).
-    ``uses_predictions`` defaults to auto-detection: the rule is enforced
-    when the run contains at least one prediction record (condition strings
-    are free-form in schema v1, so presence is the detectable signal).
+    The prediction-before-evaluation rule is read from the run's
+    ``run_start.requires_predictions`` declaration: with ``true``, every
+    evaluation needs a prediction for the same proposal logged before it;
+    with ``false``, a prediction record is itself a violation. A run with
+    no valid ``run_start`` already reports a ``run_start`` violation; the
+    prediction rule is skipped rather than guessed.
     """
     violations: list[str] = []
     by_id: dict[str, Record] = {}
@@ -93,28 +96,35 @@ def validate_run(records: Sequence[Record], uses_predictions: bool | None = None
                     f"acceptance at seq {record.seq} does not refer to an evaluation second"
                 )
 
-    if uses_predictions is None:
-        uses_predictions = any(record.kind == "prediction" for record in records)
-    if uses_predictions:
-        predictions_by_proposal: dict[str, list[Record]] = {}
-        for record in records:
-            if record.kind == "prediction":
-                predictions_by_proposal.setdefault(record.refers_to[0], []).append(record)
-        for record in records:
-            if record.kind != "evaluation":
-                continue
-            logged_before = any(
-                (prediction.stream == record.stream and prediction.seq < record.seq)
-                or (
-                    prediction.stream != record.stream and prediction.created_at < record.created_at
+    if run_start is not None and isinstance(run_start.payload, RunStart):
+        if run_start.payload.requires_predictions:
+            predictions_by_proposal: dict[str, list[Record]] = {}
+            for record in records:
+                if record.kind == "prediction":
+                    predictions_by_proposal.setdefault(record.refers_to[0], []).append(record)
+            for record in records:
+                if record.kind != "evaluation":
+                    continue
+                logged_before = any(
+                    (prediction.stream == record.stream and prediction.seq < record.seq)
+                    or (
+                        prediction.stream != record.stream
+                        and prediction.created_at < record.created_at
+                    )
+                    for prediction in predictions_by_proposal.get(record.refers_to[0], [])
                 )
-                for prediction in predictions_by_proposal.get(record.refers_to[0], [])
-            )
-            if not logged_before:
-                violations.append(
-                    f"evaluation at seq {record.seq} ({record.stream}) has no prediction "
-                    f"logged before it for proposal {record.refers_to[0]}"
-                )
+                if not logged_before:
+                    violations.append(
+                        f"evaluation at seq {record.seq} ({record.stream}) has no prediction "
+                        f"logged before it for proposal {record.refers_to[0]}"
+                    )
+        else:
+            for record in records:
+                if record.kind == "prediction":
+                    violations.append(
+                        f"prediction at seq {record.seq} in a run that declares "
+                        "requires_predictions=false"
+                    )
 
     if run_start is not None and isinstance(run_start.payload, RunStart):
         limits = run_start.payload.budget_limits

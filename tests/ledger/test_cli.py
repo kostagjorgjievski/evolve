@@ -7,7 +7,7 @@ import pytest
 
 from evolvets.ledger.blobs import BlobStore
 from evolvets.ledger.canonical import canonical_json
-from evolvets.ledger.payloads import Prediction, Proposal, RunStart
+from evolvets.ledger.payloads import Evaluation, Prediction, Proposal, RunStart
 from evolvets.ledger.schema import ZERO_HASH, Budget, make_record
 from evolvets.ledger.store import STALE_EMPTY_LOCK_SECONDS, LedgerWriter
 from evolvets.runner.cli import main
@@ -121,6 +121,7 @@ def test_verify_detects_budget_exceeded(root, run_start, run_end, capsys):
     tight = RunStart(
         condition=run_start.condition,
         seed=run_start.seed,
+        requires_predictions=False,
         config_blob=run_start.config_blob,
         git_commit=run_start.git_commit,
         protocol_versions=run_start.protocol_versions,
@@ -136,6 +137,53 @@ def test_verify_detects_budget_exceeded(root, run_start, run_end, capsys):
 def test_verify_missing_run_fails(root, capsys):
     assert main(["ledger", "verify", str(root), "no-such-run"]) == 1
     assert "missing" in capsys.readouterr().out
+
+
+def test_verify_fails_on_missing_required_prediction(root, run_start, capsys):
+    """The fixture of the auto-detection gap: evaluation with no prediction."""
+    store = BlobStore(root / RUN_ID / "blobs")
+    store.put(b"config")
+    with LedgerWriter(root, RUN_ID, "main") as writer:
+        writer.append("run_start", run_start)
+        proposal = writer.append("proposal", make_proposal(store))
+        writer.append(
+            "evaluation",
+            Evaluation(
+                pool="dev", status="ok", metrics={"mase": 0.5}, per_task_blob=None, error=None
+            ),
+            refers_to=[proposal.record_id],
+        )
+    assert main(["ledger", "verify", str(root), RUN_ID]) == 1
+    assert "no prediction logged before it" in capsys.readouterr().out
+
+
+def test_verify_clean_prediction_before_evaluation(root, run_start, run_end, capsys):
+    """Same-stream prediction before evaluation verifies clean end to end."""
+    store = BlobStore(root / RUN_ID / "blobs")
+    store.put(b"config")
+    with LedgerWriter(root, RUN_ID, "main") as writer:
+        writer.append("run_start", run_start)
+        proposal = writer.append("proposal", make_proposal(store))
+        writer.append(
+            "prediction",
+            Prediction(
+                predictor={"id": "selfmodel", "version": "1"},
+                metric="mase",
+                horizon_generations=1,
+                quantiles={"q05": 0.1, "q25": 0.2, "q50": 0.3, "q75": 0.4, "q95": 0.6},
+            ),
+            refers_to=[proposal.record_id],
+        )
+        writer.append(
+            "evaluation",
+            Evaluation(
+                pool="dev", status="ok", metrics={"mase": 0.5}, per_task_blob=None, error=None
+            ),
+            refers_to=[proposal.record_id],
+        )
+        writer.append("run_end", run_end)
+    assert main(["ledger", "verify", str(root), RUN_ID]) == 0
+    assert "OK" in capsys.readouterr().out
 
 
 def _plant_empty_lock(root, run_id, age_seconds):
@@ -179,6 +227,7 @@ def test_unlock_then_write_works(root, capsys):
     payload = RunStart(
         condition="c",
         seed=2,
+        requires_predictions=False,
         config_blob=config,
         git_commit="def456",
         protocol_versions={

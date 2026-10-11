@@ -1,4 +1,4 @@
-Status: active
+Status: done
 
 # Task 003: Explicit `requires_predictions` flag, then tag `ledger-schema-v1`
 

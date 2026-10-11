@@ -97,6 +97,7 @@ def test_record_survives_subprocess_crash(root):
         payload = RunStart(
             condition="c",
             seed=1,
+            requires_predictions=False,
             config_blob="sha256:" + "0" * 64,
             git_commit="abc123",
             protocol_versions={
@@ -217,6 +218,22 @@ def test_blob_failure_reports_verified_record_count(root, run_start, blob_ref):
     assert not result.ok
     assert result.seq == 1
     assert "blob check failed" in result.reason
+    assert result.records == 1
+
+
+def test_put_repair_restores_full_verification(root, run_start):
+    """A corrupted blob breaks verification until put rewrites it correctly."""
+    store = BlobStore(root / RUN_ID / "blobs")
+    store.put(b"config")
+    with LedgerWriter(root, RUN_ID, "main") as writer:
+        writer.append("run_start", run_start)
+    digest = run_start.config_blob[len("sha256:") :]
+    blob_path = root / RUN_ID / "blobs" / digest[:2] / digest
+    blob_path.write_bytes(b"corrupted")
+    assert not LedgerReader(root, RUN_ID).verify(check_blobs=True).ok
+    store.put(b"config")
+    result = LedgerReader(root, RUN_ID).verify(check_blobs=True)
+    assert result.ok
     assert result.records == 1
 
 

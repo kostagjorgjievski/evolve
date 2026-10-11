@@ -17,9 +17,10 @@ The developer, reviewer and planner agents run in GitHub Actions and hand work t
 
 1. Install the Claude GitHub App on this repository.
 2. Add repository secrets (Settings → Secrets and variables → Actions):
-   - `CLAUDE_CODE_OAUTH_TOKEN`: from `claude setup-token` (uses your Claude subscription).
+   - `CLAUDE_CODE_OAUTH_TOKEN`: from `claude setup-token` (uses your Claude subscription). Used by the reviewer and planner.
+   - `ZAI_API_KEY`: your Z.ai API key. The developer agent runs GLM through Z.ai's Anthropic-compatible endpoint.
    - `AGENTS_GH_TOKEN`: a fine-grained personal access token limited to this repository, with Contents, Pull requests and Issues set to read and write, and Actions and Metadata set to read. Leave Workflows off, so agents cannot push changes to these workflow files.
-3. Optional repository variables (same settings page, Variables tab): `AGENTS_DAILY_RUN_CAP` (default 40), `AGENTS_PAUSED` (`true` to stop everything).
+3. Optional repository variables (same settings page, Variables tab): `AGENTS_DAILY_RUN_CAP` (default 40), `AGENTS_PAUSED` (`true` to stop everything), `DEV_MODEL` (the developer's Z.ai model id, default `glm-5.3`).
 4. Create two issue labels: `needs-human` and `fyi-human`.
 5. Branch protection on `main`: require a pull request and the `checks` status check; required approvals 0 (the agents act through your account, which cannot approve its own PRs).
 

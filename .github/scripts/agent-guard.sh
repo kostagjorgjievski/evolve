@@ -9,13 +9,24 @@ set -euo pipefail
 repo="${GITHUB_REPOSITORY:?}"
 cap="${AGENTS_DAILY_RUN_CAP:-40}"
 
+fail() {
+  echo "::error title=Agent guard::$1"
+  exit 1
+}
+
+if [ -z "${GH_TOKEN:-}" ]; then
+  fail "GH_TOKEN is empty: the AGENTS_GH_TOKEN repository secret is missing or not visible to this workflow."
+fi
+
 stop() {
   echo "proceed=false" >> "$GITHUB_OUTPUT"
   echo "::notice title=Agent paused::$1"
   exit 0
 }
 
-open_human=$(gh api "repos/${repo}/issues?labels=needs-human&state=open&per_page=100" --jq 'length')
+if ! open_human=$(gh api "repos/${repo}/issues?labels=needs-human&state=open&per_page=100" --jq 'length' 2>&1); then
+  fail "Could not list issues with AGENTS_GH_TOKEN (needs Issues: read, scoped to ${repo}): ${open_human}"
+fi
 if [ "${open_human}" -gt 0 ]; then
   stop "${open_human} open needs-human issue(s); waiting for a human decision."
 fi

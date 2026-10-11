@@ -1,6 +1,5 @@
 # Protocol-critical paths need review from a human maintainer.
-# TODO: replace @OWNER with the maintainers' GitHub handles.
-/src/evolvets/arena/   @OWNER
-/src/evolvets/ledger/  @OWNER
-/.importlinter         @OWNER
-/AGENTS.md             @OWNER
+/src/evolvets/arena/   @kostagjorgjievski
+/src/evolvets/ledger/  @kostagjorgjievski
+/.importlinter         @kostagjorgjievski
+/AGENTS.md             @kostagjorgjievski

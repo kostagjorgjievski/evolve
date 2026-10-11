@@ -16,6 +16,14 @@ from evolvets.arena.realdata.prepare import (
     read_split_manifest,
     splits_manifest_path,
 )
+from evolvets.cache.datasets import CACHE_DATASETS, public_inputs
+from evolvets.cache.store import (
+    DEFAULT_HORIZON,
+    CacheError,
+    build_cache,
+    cache_id,
+    verify_cache,
+)
 from evolvets.ledger.store import LedgerLockedError, LedgerReader, LedgerWriter
 from evolvets.ledger.validate import validate_run
 
@@ -55,6 +63,34 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument(
             "--manifest-dir", default="data/manifests", help="directory holding the manifests"
         )
+
+    cache = subparsers.add_parser("cache", help="expert-forecast cache build and verification")
+    cache_sub = cache.add_subparsers(dest="cache_command", metavar="CACHE-COMMAND")
+    for name, help_text in (
+        ("build", "compute the expert forecasts and install them as a cache"),
+        ("verify", "check an existing cache against its manifest"),
+    ):
+        command = cache_sub.add_parser(name, help=help_text)
+        command.add_argument(
+            "dataset", choices=[*CACHE_DATASETS, "all"], help="which dataset (or 'all')"
+        )
+        command.add_argument("--cache-root", default="cache_store", help="cache root directory")
+        command.add_argument("--data-root", default="data", help="data root directory")
+        command.add_argument(
+            "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+        )
+        if name == "build":
+            command.add_argument(
+                "--horizon",
+                type=int,
+                default=DEFAULT_HORIZON,
+                help="forecast horizon to cache (default: 24)",
+            )
+            command.add_argument(
+                "--per-family",
+                type=int,
+                help="synthetic tasks per family; required for synthetic-dev (and 'all')",
+            )
     return parser
 
 
@@ -135,6 +171,39 @@ def _cmd_data(action: str, dataset: str, data_root: str, manifest_dir: str) -> i
     return 1 if failed else 0
 
 
+def _cmd_cache(
+    action: str,
+    dataset: str,
+    cache_root: str,
+    data_root: str,
+    manifest_dir: str,
+    horizon: int = DEFAULT_HORIZON,
+    per_family: int | None = None,
+) -> int:
+    """Build or verify each requested cache, one OK/FAIL line per dataset."""
+    failed = False
+    root = Path(cache_root)
+    for name in CACHE_DATASETS if dataset == "all" else (dataset,):
+        try:
+            if action == "build":
+                source, series = public_inputs(
+                    name, Path(data_root), Path(manifest_dir), per_family
+                )
+                manifest = build_cache(name, source, series, root, horizon=horizon)
+            else:
+                manifest = verify_cache(root, name)
+        except (CacheError, PrepareError, ValueError, OSError) as exc:
+            failed = True
+            print(f"FAIL {name}: {exc}")
+        else:
+            origins = sum(entry.n_origins for entry in manifest.series)
+            print(
+                f"OK {name}: {len(manifest.series)} series, {origins} origins, "
+                f"cache {cache_id(root, name)}"
+            )
+    return 1 if failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the EvolveTS CLI."""
     parser = build_parser()
@@ -149,6 +218,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "data":
         if args.data_command in ("fetch", "verify", "prepare"):
             return _cmd_data(args.data_command, args.dataset, args.data_root, args.manifest_dir)
+        parser.print_help()
+        return 0
+    if args.command == "cache":
+        if args.cache_command == "build":
+            return _cmd_cache(
+                "build",
+                args.dataset,
+                args.cache_root,
+                args.data_root,
+                args.manifest_dir,
+                horizon=args.horizon,
+                per_family=args.per_family,
+            )
+        if args.cache_command == "verify":
+            return _cmd_cache(
+                "verify", args.dataset, args.cache_root, args.data_root, args.manifest_dir
+            )
         parser.print_help()
         return 0
     if args.command is None:

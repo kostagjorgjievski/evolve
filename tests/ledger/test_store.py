@@ -9,7 +9,9 @@ import textwrap
 import pytest
 
 import evolvets.ledger.store as store_module
+from evolvets.ledger.blobs import BlobStore
 from evolvets.ledger.canonical import canonical_json
+from evolvets.ledger.payloads import Commitment
 from evolvets.ledger.schema import make_record
 from evolvets.ledger.store import (
     LedgerCorruptError,
@@ -200,6 +202,22 @@ def test_verify_fails_for_missing_run(root):
     assert not result.ok
     assert "missing" in result.reason
     assert result.records == 0
+
+
+def test_blob_failure_reports_verified_record_count(root, run_start, blob_ref):
+    store = BlobStore(root / RUN_ID / "blobs")
+    store.put(b"config")
+    commitment = Commitment(
+        subject="daily-forecast", content_hash=blob_ref("commitment"), external_timestamp=None
+    )
+    with LedgerWriter(root, RUN_ID, "main") as writer:
+        writer.append("run_start", run_start)
+        writer.append("commitment", commitment)
+    result = LedgerReader(root, RUN_ID).verify(check_blobs=True)
+    assert not result.ok
+    assert result.seq == 1
+    assert "blob check failed" in result.reason
+    assert result.records == 1
 
 
 def _make_dead_pid():

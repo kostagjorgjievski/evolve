@@ -1,5 +1,6 @@
 """Append-only ledger: canonical JSON, record envelope, chained store."""
 
+from evolvets.ledger.blobs import BlobError, BlobStore, find_blob_refs
 from evolvets.ledger.canonical import canonical_bytes, canonical_json, sha256_hex
 from evolvets.ledger.payloads import (
     Acceptance,
@@ -34,6 +35,7 @@ from evolvets.ledger.store import (
     LedgerWriter,
     VerifyResult,
 )
+from evolvets.ledger.validate import validate_run
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -42,6 +44,8 @@ __all__ = [
     "Acceptance",
     "Allocation",
     "Baseline",
+    "BlobError",
+    "BlobStore",
     "Budget",
     "Commitment",
     "Correction",
@@ -62,8 +66,10 @@ __all__ = [
     "VerifyResult",
     "canonical_bytes",
     "canonical_json",
+    "find_blob_refs",
     "make_record",
     "payload_from_dict",
     "payload_to_dict",
     "sha256_hex",
+    "validate_run",
 ]

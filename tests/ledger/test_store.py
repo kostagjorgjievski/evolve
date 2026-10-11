@@ -1,5 +1,7 @@
 """Writer and reader behaviour: append, resume, locking, tamper detection."""
 
+import json
+import socket
 import subprocess
 import sys
 import textwrap
@@ -178,3 +180,68 @@ def test_store_exposes_no_mutation_api():
             for member in vars(obj):
                 for word in forbidden:
                     assert word not in member.lower(), f"{obj.__name__} exposes {member!r}"
+
+
+def test_torn_tail_detected_and_writer_refuses(root, run_start, run_end):
+    write_two(root, run_start, run_end)
+    path = root / RUN_ID / "main.jsonl"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.rstrip("\n"), encoding="utf-8")
+    result = LedgerReader(root, RUN_ID).verify()
+    assert not result.ok
+    assert result.seq == 1
+    assert "torn tail" in result.reason
+    with pytest.raises(LedgerCorruptError):
+        LedgerWriter(root, RUN_ID, "main")
+
+
+def test_verify_fails_for_missing_run(root):
+    result = LedgerReader(root, "no-such-run").verify()
+    assert not result.ok
+    assert "missing" in result.reason
+    assert result.records == 0
+
+
+def _make_dead_pid():
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+def _plant_lock(root, run_id, pid, host):
+    lock_path = root / run_id / "main.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(json.dumps({"pid": pid, "host": host, "created_at": "now"}))
+    return lock_path
+
+
+def test_stale_lock_with_live_pid_is_refused(root, run_start):
+    writer = LedgerWriter(root, RUN_ID, "main")
+    try:
+        with pytest.raises(LedgerLockedError) as excinfo:
+            LedgerWriter(root, RUN_ID, "main")
+        assert "stale lock:" not in str(excinfo.value)
+        with pytest.raises(LedgerLockedError, match="refusing to break"):
+            LedgerWriter.break_stale_lock(root, RUN_ID, "main")
+    finally:
+        writer.close()
+
+
+def test_stale_lock_with_dead_pid_can_be_broken(root, run_start):
+    lock_path = _plant_lock(root, RUN_ID, _make_dead_pid(), socket.gethostname())
+    with pytest.raises(LedgerLockedError, match="stale"):
+        LedgerWriter(root, RUN_ID, "main")
+    LedgerWriter.break_stale_lock(root, RUN_ID, "main")
+    assert not lock_path.exists()
+    with LedgerWriter(root, RUN_ID, "main") as writer:
+        writer.append("run_start", run_start)
+    assert LedgerReader(root, RUN_ID).verify().ok
+
+
+def test_foreign_host_lock_is_not_stale(root):
+    _plant_lock(root, RUN_ID, _make_dead_pid(), "some-other-host")
+    with pytest.raises(LedgerLockedError) as excinfo:
+        LedgerWriter(root, RUN_ID, "main")
+    assert "stale lock:" not in str(excinfo.value)
+    with pytest.raises(LedgerLockedError, match="refusing to break"):
+        LedgerWriter.break_stale_lock(root, RUN_ID, "main")

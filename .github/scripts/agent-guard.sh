@@ -34,8 +34,10 @@ fi
 today=$(date -u +%Y-%m-%d)
 runs=0
 for wf in agent-developer.yml agent-reviewer.yml agent-planner.yml; do
-  n=$(gh api "repos/${repo}/actions/workflows/${wf}/runs?created=>=${today}&per_page=100" \
-        --jq '[.workflow_runs[] | select(.event != "schedule")] | length' 2>/dev/null || echo 0)
+  if ! n=$(gh api "repos/${repo}/actions/workflows/${wf}/runs?created=>=${today}&per_page=100" \
+        --jq '[.workflow_runs[] | select(.event != "schedule")] | length' 2>&1); then
+    fail "Could not count today's runs of ${wf} (AGENTS_GH_TOKEN needs Actions: read), so the daily cap can't be enforced: ${n}"
+  fi
   runs=$((runs + n))
 done
 if [ "${runs}" -gt "${cap}" ]; then

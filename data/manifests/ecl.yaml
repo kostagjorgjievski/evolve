@@ -1,0 +1,10 @@
+{
+  "dataset": "ecl",
+  "downloaded_on": "2026-10-11",
+  "filename": "electricityloaddiagrams20112014.zip",
+  "license": "CC-BY-4.0",
+  "manifest_version": "1",
+  "sha256": "f6c4d0e0df12ecdb9ea008dd6eef3518adb52c559d04a9bac2e1b81dcfc8d4e1",
+  "size_bytes": 261335609,
+  "url": "https://archive.ics.uci.edu/static/public/321/electricityloaddiagrams20112014.zip"
+}

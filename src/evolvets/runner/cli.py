@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
+from pathlib import Path
 
 from evolvets import __version__
+from evolvets.arena.realdata import sources
+from evolvets.arena.realdata.fetch import FetchError, fetch, verify_raw
+from evolvets.arena.realdata.manifest import ManifestError, RawManifest
 from evolvets.ledger.store import LedgerLockedError, LedgerReader, LedgerWriter
 from evolvets.ledger.validate import validate_run
+
+_DATASET_ORDER = ("etth1", "ecl")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,7 +33,30 @@ def build_parser() -> argparse.ArgumentParser:
     unlock.add_argument("root", help="ledger root directory (contains <run_id>/)")
     unlock.add_argument("run_id", help="the run whose stream is locked")
     unlock.add_argument("stream", choices=["main", "sealed"], help="the locked stream")
+
+    data = subparsers.add_parser("data", help="real-data download and verification")
+    data_sub = data.add_subparsers(dest="data_command", metavar="DATA-COMMAND")
+    for name, help_text in (
+        ("fetch", "download and pin the raw data files"),
+        ("verify", "verify raw data files against their manifests"),
+    ):
+        command = data_sub.add_parser(name, help=help_text)
+        command.add_argument(
+            "dataset", choices=[*_DATASET_ORDER, "all"], help="which dataset (or 'all')"
+        )
+        command.add_argument("--data-root", default="data", help="data root directory")
+        command.add_argument(
+            "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+        )
     return parser
+
+
+def _selected_datasets(dataset: str) -> Iterator[str]:
+    """Expand the CLI dataset argument to dataset names in pinned order."""
+    if dataset == "all":
+        yield from _DATASET_ORDER
+    else:
+        yield dataset
 
 
 def _cmd_ledger_verify(root: str, run_id: str) -> int:
@@ -56,6 +86,24 @@ def _cmd_ledger_unlock(root: str, run_id: str, stream: str) -> int:
     return 0
 
 
+def _cmd_data(action: str, dataset: str, data_root: str, manifest_dir: str) -> int:
+    """Fetch or verify each requested dataset, one OK/FAIL line per dataset."""
+    failed = False
+    for name in _selected_datasets(dataset):
+        try:
+            source = sources.SOURCES[name]
+            if action == "fetch":
+                manifest: RawManifest = fetch(source, Path(data_root), Path(manifest_dir))
+            else:
+                manifest = verify_raw(source, Path(data_root), Path(manifest_dir))
+        except (FetchError, ManifestError, OSError) as exc:
+            failed = True
+            print(f"FAIL {name}: {exc}")
+        else:
+            print(f"OK {name}: {manifest.sha256} {manifest.size_bytes} bytes")
+    return 1 if failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the EvolveTS CLI."""
     parser = build_parser()
@@ -65,6 +113,11 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_ledger_verify(args.root, args.run_id)
         if args.ledger_command == "unlock":
             return _cmd_ledger_unlock(args.root, args.run_id, args.stream)
+        parser.print_help()
+        return 0
+    if args.command == "data":
+        if args.data_command in ("fetch", "verify"):
+            return _cmd_data(args.data_command, args.dataset, args.data_root, args.manifest_dir)
         parser.print_help()
         return 0
     if args.command is None:

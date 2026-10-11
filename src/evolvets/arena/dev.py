@@ -1,0 +1,241 @@
+"""Dev pools: the public series and scoring boundaries a replay is driven over.
+
+A dev pool ties a cache to the public values it was built from, plus the
+warmup/dev split boundaries that decide which origins are scored and which
+window the MASE scale is read from. Synthetic pools also carry their change
+points and the true-best forecasts the oracle metrics need. Nothing here holds
+a value past the last scored target: ``values`` is truncated to
+``[: score_end + horizon]`` after the hash check.
+"""
+
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+from evolvets.arena.errors import ArenaError
+from evolvets.arena.realdata.prepare import PrepareError, load_public
+from evolvets.arena.synthetic import GENERATOR_VERSION
+from evolvets.arena.synthetic.grammar import FAMILIES, GrammarConfig, SyntheticTask
+from evolvets.arena.synthetic.oracle import true_best_forecast
+from evolvets.arena.synthetic.seeds import dev_tasks
+from evolvets.cache.datasets import CACHE_DATASETS
+from evolvets.cache.interfaces import CachedSeries, CacheManifest
+from evolvets.cache.store import CacheError, cache_id, read_manifest
+from evolvets.ledger.canonical import canonical_bytes, sha256_hex
+
+_REAL_PERIOD = 24
+
+
+@dataclass(frozen=True)
+class DevSeries:
+    """One public series with the boundaries its replay and scoring use."""
+
+    series_id: str
+    period: int
+    values: tuple[float, ...]  # exactly values[: score_end + horizon]
+    scale_end: int  # MASE scale uses y_0 .. y_{scale_end - 1}
+    score_start: int  # first scored origin
+    score_end: int  # exclusive; also the replay's end_origin
+    change_points: tuple[int, ...]  # synthetic only, else ()
+    oracle: (
+        tuple[tuple[float, ...], ...] | None
+    )  # true-best forecasts, [origin - score_start][h-1]; synthetic only
+
+
+@dataclass(frozen=True)
+class DevPool:
+    """A cache plus the public series to replay over, in cache manifest order."""
+
+    dataset: str  # one of CACHE_DATASETS
+    cache_root: Path
+    cache_id: str
+    manifest: CacheManifest
+    series: tuple[DevSeries, ...]  # cache manifest order
+
+
+def load_dev_pool(dataset: str, cache_root: Path, data_root: Path, manifest_dir: Path) -> DevPool:
+    """Load the dev pool for ``dataset`` from its cache and its public data.
+
+    Every failure — an unknown dataset, a missing or tampered cache, missing
+    or tampered public data — surfaces as :class:`ArenaError`, so no caller
+    needs to know the cache's and the real-data layer's own error types.
+    """
+    if dataset not in CACHE_DATASETS:
+        raise ArenaError(f"unknown dataset {dataset!r}; expected one of {list(CACHE_DATASETS)}")
+    try:
+        manifest = read_manifest(cache_root, dataset)
+        ident = cache_id(cache_root, dataset)
+    except CacheError as exc:
+        raise ArenaError(str(exc)) from exc
+    if dataset in ("etth1", "ecl"):
+        series = _real_series(dataset, manifest, data_root, manifest_dir)
+    else:
+        series = _synthetic_series(manifest)
+    return DevPool(
+        dataset=dataset,
+        cache_root=Path(cache_root),
+        cache_id=ident,
+        manifest=manifest,
+        series=series,
+    )
+
+
+def _real_series(
+    dataset: str, manifest: CacheManifest, data_root: Path, manifest_dir: Path
+) -> tuple[DevSeries, ...]:
+    """Build the dev series of a real dataset from its public values and split."""
+    try:
+        public = load_public(dataset, data_root, manifest_dir)
+    except PrepareError as exc:
+        raise ArenaError(str(exc)) from exc
+    if len(public) != len(manifest.series):
+        raise ArenaError(
+            f"{manifest.dataset}: the cache holds {len(manifest.series)} series but the "
+            f"public data has {len(public)}"
+        )
+    out: list[DevSeries] = []
+    for entry, loaded in zip(manifest.series, public, strict=True):
+        if loaded.series_id != entry.series_id:
+            raise ArenaError(
+                f"{manifest.dataset}: cache series {entry.series_id!r} does not match the "
+                f"public series {loaded.series_id!r} at the same position"
+            )
+        if entry.period != _REAL_PERIOD:
+            raise ArenaError(
+                f"{entry.series_id}: the cache records period {entry.period}, not {_REAL_PERIOD}"
+            )
+        _match_values(entry, loaded.values)
+        warmup, dev, _sealed, _reserve = loaded.split.segments
+        out.append(
+            _checked_series(
+                entry,
+                loaded.values,
+                manifest.horizon,
+                scale_end=warmup.end,
+                score_start=dev.start,
+                score_end=dev.end,
+                change_points=(),
+                oracle=None,
+            )
+        )
+    return tuple(out)
+
+
+def _synthetic_series(manifest: CacheManifest) -> tuple[DevSeries, ...]:
+    """Build the synthetic dev series: worlds, change points and the oracle."""
+    source = manifest.source
+    if source.get("generator_version") != GENERATOR_VERSION:
+        raise ArenaError(
+            f"{manifest.dataset}: cache generator_version "
+            f"{source.get('generator_version')!r} != current {GENERATOR_VERSION!r}; unknown "
+            "generator versions are refused, not reinterpreted"
+        )
+    try:
+        per_family = int(source["per_family"])
+    except (KeyError, ValueError) as exc:
+        raise ArenaError(
+            f"{manifest.dataset}: source.per_family must be an int written as a string: {exc}"
+        ) from exc
+    if per_family < 1:
+        raise ArenaError(f"{manifest.dataset}: source.per_family must be >= 1, got {per_family}")
+    expected: list[tuple[str, SyntheticTask]] = []
+    for family in FAMILIES:
+        for index, task in enumerate(dev_tasks(family, per_family)):
+            expected.append((f"{family}/{index}", task))
+    if len(expected) != len(manifest.series):
+        raise ArenaError(
+            f"{manifest.dataset}: {per_family} series per family is {len(expected)} series, "
+            f"but the cache holds {len(manifest.series)}"
+        )
+    warmup = GrammarConfig().warmup
+    out: list[DevSeries] = []
+    for entry, (expected_id, task) in zip(manifest.series, expected, strict=True):
+        if entry.series_id != expected_id:
+            raise ArenaError(
+                f"{manifest.dataset}: cache series {entry.series_id!r} where task "
+                f"{expected_id!r} was expected"
+            )
+        world = task.world
+        if entry.period != world.spec.period:
+            raise ArenaError(
+                f"{entry.series_id}: the cache records period {entry.period}, but the world "
+                f"has {world.spec.period}"
+            )
+        _match_values(entry, world.y)
+        score_end = entry.length - manifest.horizon
+        series = _checked_series(
+            entry,
+            world.y,
+            manifest.horizon,
+            scale_end=warmup,
+            score_start=warmup,
+            score_end=score_end,
+            change_points=world.change_points,
+            oracle=None,
+        )
+        oracle = tuple(
+            true_best_forecast(world, origin, manifest.horizon)
+            for origin in range(warmup, score_end)
+        )
+        out.append(replace(series, oracle=oracle))
+    return tuple(out)
+
+
+def _match_values(entry: CachedSeries, values: tuple[float, ...]) -> None:
+    """Check the public values against the cache's hash and length."""
+    digest = sha256_hex(canonical_bytes(list(values)))
+    if digest != entry.values_sha256:
+        raise ArenaError(
+            f"{entry.series_id}: the public values hash to {digest}, but the cache recorded "
+            f"{entry.values_sha256}"
+        )
+    if len(values) != entry.length:
+        raise ArenaError(
+            f"{entry.series_id}: {len(values)} public values, but the cache recorded {entry.length}"
+        )
+
+
+def _checked_series(
+    entry: CachedSeries,
+    values: tuple[float, ...],
+    horizon: int,
+    *,
+    scale_end: int,
+    score_start: int,
+    score_end: int,
+    change_points: tuple[int, ...],
+    oracle: tuple[tuple[float, ...], ...] | None,
+) -> DevSeries:
+    """Check the scoring boundaries against the cache, then truncate the values."""
+    if score_start < entry.first_origin:
+        raise ArenaError(
+            f"{entry.series_id}: scoring starts at origin {score_start}, before the cache's "
+            f"first origin {entry.first_origin}"
+        )
+    if score_start >= score_end:
+        raise ArenaError(f"{entry.series_id}: empty scoring range [{score_start}, {score_end})")
+    if scale_end < entry.period + 1:
+        raise ArenaError(
+            f"{entry.series_id}: the MASE scale window [0, {scale_end}) holds no seasonal "
+            f"difference for period {entry.period}"
+        )
+    if scale_end > score_start:
+        raise ArenaError(
+            f"{entry.series_id}: the MASE scale window ends at {scale_end}, inside the "
+            f"scored range from {score_start}"
+        )
+    if score_end + horizon > len(values):
+        raise ArenaError(
+            f"{entry.series_id}: scoring [{score_start}, {score_end}) with horizon {horizon} "
+            f"needs a target at index {score_end + horizon - 1}, but only {len(values)} "
+            f"public values exist"
+        )
+    return DevSeries(
+        series_id=entry.series_id,
+        period=entry.period,
+        values=values[: score_end + horizon],
+        scale_end=scale_end,
+        score_start=score_start,
+        score_end=score_end,
+        change_points=change_points,
+        oracle=oracle,
+    )

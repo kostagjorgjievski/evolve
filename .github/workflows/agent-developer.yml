@@ -65,13 +65,16 @@ jobs:
         run: |
           git config user.name "evolvets-developer-agent"
           git config user.email "noreply@anthropic.com"
-      # The developer is GLM (Z.ai), run through Claude Code's agent harness via
-      # Z.ai's Anthropic-compatible endpoint. Reviewer and planner run on Claude.
+      # The developer is GLM (Zhipu bigmodel.cn), run through Claude Code's agent
+      # harness via the Anthropic-compatible endpoint. Reviewer and planner run
+      # on Claude. Override the endpoint with the DEV_BASE_URL repo variable.
       - uses: anthropics/claude-code-action@v1
         env:
-          ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
+          ANTHROPIC_BASE_URL: ${{ vars.DEV_BASE_URL || 'https://open.bigmodel.cn/api/anthropic' }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ZAI_API_KEY }}
           API_TIMEOUT_MS: "3000000"
+          # Closest equivalent of maximum reasoning effort in Claude Code.
+          MAX_THINKING_TOKENS: ${{ vars.DEV_MAX_THINKING_TOKENS || '32000' }}
           ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.DEV_MODEL || 'glm-5.3' }}
           ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.DEV_MODEL || 'glm-5.3' }}
           ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.DEV_MODEL || 'glm-5.3' }}

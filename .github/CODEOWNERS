@@ -1,0 +1,5 @@
+# Protocol-critical paths need review from a human maintainer.
+/src/evolvets/arena/   @kostagjorgjievski
+/src/evolvets/ledger/  @kostagjorgjievski
+/.importlinter         @kostagjorgjievski
+/AGENTS.md             @kostagjorgjievski

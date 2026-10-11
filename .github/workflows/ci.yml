@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+      - name: Set up Python
+        run: uv python install 3.11
+      - name: Install
+        run: uv sync --all-groups
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+      - name: Mypy
+        run: uv run mypy
+      - name: Import contracts (sealed/live isolation)
+        run: uv run lint-imports
+      - name: Import contracts must reject violations
+        run: |
+          probe=src/evolvets/updater/_violation_probe.py
+          echo 'import evolvets.arena.sealed' > "$probe"
+          if uv run lint-imports > /dev/null 2>&1; then
+            echo "lint-imports accepted a forbidden import of evolvets.arena.sealed"
+            rm "$probe"
+            exit 1
+          fi
+          rm "$probe"
+          echo "OK: the sealed/live contract rejects violations"
+      - name: Tests
+        run: uv run pytest

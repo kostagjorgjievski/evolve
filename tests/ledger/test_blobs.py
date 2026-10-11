@@ -45,6 +45,15 @@ def test_corrupted_blob_detected(store):
         store.get(ref)
 
 
+def test_put_repairs_corrupted_existing_blob(store):
+    ref = store.put(b"original content")
+    digest = ref[len("sha256:") :]
+    path = store._dir / digest[:2] / digest
+    path.write_bytes(b"tampered content")
+    assert store.put(b"original content") == ref
+    assert store.get(ref) == b"original content"
+
+
 def test_missing_blob_rejected(store):
     ref = f"sha256:{'0' * 64}"
     with pytest.raises(BlobError, match="missing blob"):

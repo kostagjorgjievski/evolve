@@ -42,14 +42,24 @@ def validate_run(records: Sequence[Record], uses_predictions: bool | None = None
     run_start = next(
         (r for r in main if r.kind == "run_start" and isinstance(r.payload, RunStart)), None
     )
+    run_starts = [r for r in records if r.kind == "run_start"]
+    if len(run_starts) > 1:
+        violations.append(f"{len(run_starts)} run_start records; exactly one is allowed")
+    run_ends = [r for r in records if r.kind == "run_end"]
+    if len(run_ends) > 1:
+        violations.append(f"{len(run_ends)} run_end records; at most one is allowed")
+    for record in run_starts:
+        if record.stream != "main":
+            violations.append(f"run_start at seq {record.seq} is only allowed in the main stream")
+    for record in run_ends:
+        if record.stream != "main":
+            violations.append(f"run_end at seq {record.seq} is only allowed in the main stream")
     if not main:
         violations.append("main stream has no records")
     elif main[0].kind != "run_start":
         violations.append("the first record of main must be run_start")
-    run_ends = [r for r in main if r.kind == "run_end"]
-    if len(run_ends) > 1:
-        violations.append(f"{len(run_ends)} run_end records; at most one is allowed")
-    if run_ends and main and run_ends[0] is not main[-1]:
+    main_run_ends = [r for r in run_ends if r.stream == "main"]
+    if main_run_ends and main_run_ends[-1] is not main[-1]:
         violations.append("run_end must be the last record of main")
 
     for record in records:
@@ -67,6 +77,10 @@ def validate_run(records: Sequence[Record], uses_predictions: bool | None = None
                 violations.append(
                     f"{record.kind} at seq {record.seq} refers to {ref} at seq {target.seq}"
                 )
+        if record.kind in ("prediction", "evaluation"):
+            target = by_id.get(record.refers_to[0])
+            if target is None or target.kind != "proposal":
+                violations.append(f"{record.kind} at seq {record.seq} does not refer to a proposal")
         if record.kind == "acceptance":
             proposal = by_id.get(record.refers_to[0])
             evaluation = by_id.get(record.refers_to[1])
@@ -92,8 +106,7 @@ def validate_run(records: Sequence[Record], uses_predictions: bool | None = None
             logged_before = any(
                 (prediction.stream == record.stream and prediction.seq < record.seq)
                 or (
-                    prediction.stream != record.stream
-                    and prediction.created_at <= record.created_at
+                    prediction.stream != record.stream and prediction.created_at < record.created_at
                 )
                 for prediction in predictions_by_proposal.get(record.refers_to[0], [])
             )

@@ -33,7 +33,7 @@ def mk(
     )
 
 
-def run_start(at, limits=None, record_id=None):
+def run_start(at, limits=None, record_id=None, stream="main", seq=0):
     payload = RunStart(
         condition="c",
         seed=1,
@@ -42,7 +42,7 @@ def run_start(at, limits=None, record_id=None):
         protocol_versions={"ledger": "1.0", "arena": "0", "generator": "0", "cache_manifest": "0"},
         budget_limits=limits if limits is not None else Budget(),
     )
-    return mk("run_start", payload, seq=0, created_at=at, record_id=record_id)
+    return mk("run_start", payload, seq=seq, created_at=at, record_id=record_id, stream=stream)
 
 
 def proposal(at, seq, record_id=None, budget=None):
@@ -88,8 +88,10 @@ def acceptance(at, seq, proposal_id, evaluation_id):
     return mk("acceptance", payload, seq=seq, created_at=at, refers_to=[proposal_id, evaluation_id])
 
 
-def run_end(at, seq):
-    return mk("run_end", RunEnd(status="completed", summary={}), seq=seq, created_at=at)
+def run_end(at, seq, stream="main"):
+    return mk(
+        "run_end", RunEnd(status="completed", summary={}), seq=seq, created_at=at, stream=stream
+    )
 
 
 def test_valid_run_has_no_violations():
@@ -203,3 +205,63 @@ def test_duplicate_record_id_rejected():
         proposal("2026-10-11T11:00:01.000000Z", 1, record_id=shared),
     ]
     assert any("duplicate record_id" in v for v in validate_run(records))
+
+
+def test_prediction_must_refer_to_a_proposal():
+    start = run_start("2026-10-11T11:00:00.000000Z")
+    records = [start, prediction("2026-10-11T11:00:02.000000Z", 1, start.record_id)]
+    assert any(
+        "prediction at seq 1 does not refer to a proposal" in v for v in validate_run(records)
+    )
+
+
+def test_evaluation_must_refer_to_a_proposal():
+    start = run_start("2026-10-11T11:00:00.000000Z")
+    records = [
+        start,
+        proposal("2026-10-11T11:00:01.000000Z", 1),
+        evaluation("2026-10-11T11:00:03.000000Z", 2, start.record_id),
+    ]
+    assert any(
+        "evaluation at seq 2 does not refer to a proposal" in v for v in validate_run(records)
+    )
+
+
+def test_cross_stream_prediction_with_equal_timestamp_rejected():
+    p = proposal("2026-10-11T11:00:01.000000Z", 1)
+    tie = prediction("2026-10-11T11:00:02.000000Z", 2, p.record_id)
+    e = evaluation("2026-10-11T11:00:02.000000Z", 0, p.record_id, stream="sealed")
+    records = [run_start("2026-10-11T11:00:00.000000Z"), p, tie, e]
+    assert any("no prediction logged before it" in v for v in validate_run(records))
+
+
+def test_second_run_start_rejected():
+    records = [
+        run_start("2026-10-11T11:00:00.000000Z"),
+        proposal("2026-10-11T11:00:01.000000Z", 1),
+        run_start("2026-10-11T11:00:02.000000Z", seq=2),
+    ]
+    violations = validate_run(records)
+    assert any("2 run_start records; exactly one is allowed" in v for v in violations)
+
+
+def test_run_start_in_sealed_stream_rejected():
+    records = [
+        run_start("2026-10-11T11:00:00.000000Z"),
+        proposal("2026-10-11T11:00:01.000000Z", 1),
+        run_start("2026-10-11T11:00:02.000000Z", stream="sealed"),
+    ]
+    assert any(
+        "run_start at seq 0 is only allowed in the main stream" in v for v in validate_run(records)
+    )
+
+
+def test_run_end_in_sealed_stream_rejected():
+    records = [
+        run_start("2026-10-11T11:00:00.000000Z"),
+        proposal("2026-10-11T11:00:01.000000Z", 1),
+        run_end("2026-10-11T11:00:02.000000Z", 0, stream="sealed"),
+    ]
+    assert any(
+        "run_end at seq 0 is only allowed in the main stream" in v for v in validate_run(records)
+    )

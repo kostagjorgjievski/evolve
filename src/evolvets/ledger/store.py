@@ -206,7 +206,8 @@ class LedgerWriter:
         """Break a lock whose owning process is dead on this host.
 
         The explicit recovery path for a crashed writer: it succeeds only when
-        the lock file records this host and a pid that no longer exists.
+        the lock file records this host and a pid that no longer exists, or is
+        an empty lock file older than ``STALE_EMPTY_LOCK_SECONDS``.
         """
         if stream not in STREAMS:
             raise ValueError(f"stream must be one of {STREAMS}, got {stream!r}")
@@ -297,19 +298,28 @@ class LedgerReader:
             if problem is not None:
                 return VerifyResult(False, stream, position, problem, total)
             if check_blobs:
-                blob_result = self._verify_blobs(read, stream)
+                blob_result = self._verify_blobs(read, stream, total)
                 if blob_result is not None:
                     return blob_result
             total += len(read)
         return VerifyResult(True, None, None, "ok", total)
 
-    def _verify_blobs(self, records: list[Record], stream: str) -> VerifyResult | None:
-        """Check every blob reference of ``records``; ``None`` when all exist."""
+    def _verify_blobs(
+        self, records: list[Record], stream: str, verified: int
+    ) -> VerifyResult | None:
+        """Check every blob reference of ``records``; ``None`` when all exist.
+
+        ``verified`` is the count of records already verified before this
+        stream; a failure reports it plus the records of this stream that
+        were checked, matching what chain failures report.
+        """
         store = BlobStore(self._dir / "blobs")
-        for record in records:
+        for index, record in enumerate(records):
             for ref in find_blob_refs(dataclasses.asdict(record.payload)):
                 try:
                     store.get(ref)
                 except BlobError as exc:
-                    return VerifyResult(False, stream, record.seq, f"blob check failed: {exc}", 0)
+                    return VerifyResult(
+                        False, stream, record.seq, f"blob check failed: {exc}", verified + index
+                    )
         return None

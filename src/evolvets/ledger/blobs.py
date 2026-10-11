@@ -2,9 +2,10 @@
 
 Code, arrays, traces and prompts live as blobs; payloads hold only small
 fields and ``sha256:<64 hex>`` references. Content is written atomically
-(temperature file, fsync, rename) under ``blobs/<first 2 hex>/<hash>`` and
-never modified or removed afterwards. ``get`` re-hashes the content and
-raises on any mismatch.
+(temporary file, fsync, rename) under ``blobs/<first 2 hex>/<hash>`` and
+never deleted. The one rewrite ``put`` will do is repairing a corrupted
+blob file with the content its reference already names. ``get`` re-hashes
+the content and raises on any mismatch.
 """
 
 from __future__ import annotations
@@ -50,13 +51,14 @@ class BlobStore:
     def put(self, data: bytes) -> str:
         """Store ``data`` atomically and return its ``sha256:...`` reference.
 
-        Writing content that already exists is a no-op that returns the same
-        reference.
+        Writing content whose blob is already stored intact is a no-op that
+        returns the same reference; a corrupted existing blob file is
+        atomically replaced with the correct content.
         """
         digest = hashlib.sha256(data).hexdigest()
         ref = f"sha256:{digest}"
         path = self._dir / digest[:2] / digest
-        if path.exists():
+        if path.exists() and path.read_bytes() == data:
             return ref
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_name(f"{digest}.tmp-{os.getpid()}-{uuid.uuid4().hex}")

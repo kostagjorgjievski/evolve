@@ -56,3 +56,17 @@ def test_unknown_stream_rejected(run_end):
 
 def test_zero_hash_is_64_zeros():
     assert ZERO_HASH == "0" * 64
+
+
+def test_unknown_kind_rejected_at_construction(run_end):
+    kwargs = _sample_kwargs(run_end)
+    kwargs.update(kind="bogus")
+    with pytest.raises(ValueError, match="unknown kind"):
+        make_record(**kwargs)
+
+
+def test_kind_payload_mismatch_rejected_at_construction(run_start):
+    kwargs = _sample_kwargs(run_start)
+    kwargs.update(kind="run_end", payload=run_start)
+    with pytest.raises(ValueError, match="must be"):
+        make_record(**kwargs)

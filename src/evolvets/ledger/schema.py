@@ -121,6 +121,9 @@ class Record:
             raise RecordError("budget must be a Budget instance")
         if not dataclasses.is_dataclass(self.payload) or isinstance(self.payload, type):
             raise RecordError("payload must be a payload dataclass instance")
+        from evolvets.ledger.payloads import validate_kind_payload  # avoids import cycle
+
+        validate_kind_payload(self.kind, self.payload)
         pool = getattr(self.payload, "pool", None)
         if pool is not None and pool != "dev" and self.stream != "sealed":
             raise RecordError(f"{self.kind} with pool {pool!r} is valid only in the sealed stream")

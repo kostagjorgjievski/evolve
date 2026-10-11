@@ -3,13 +3,13 @@
 # $GITHUB_OUTPUT. The pause switch (repo variable AGENTS_PAUSED) is checked in
 # the workflow itself; this script handles the remaining stop conditions:
 #   1. any open issue labelled `needs-human` pauses every agent;
-#   2. a daily cap on event-triggered agent runs (AGENTS_DAILY_RUN_CAP, default 40).
+#   2. a daily cap on event-triggered agent runs (AGENTS_DAILY_RUN_CAP, default 400).
 #      Runs skipped by the workflow's trigger filter don't count; only runs
 #      that passed the filter and reached this guard do.
 set -euo pipefail
 
 repo="${GITHUB_REPOSITORY:?}"
-cap="${AGENTS_DAILY_RUN_CAP:-40}"
+cap="${AGENTS_DAILY_RUN_CAP:-400}"
 
 fail() {
   echo "::error title=Agent guard::$1"
@@ -36,11 +36,14 @@ fi
 today=$(date -u +%Y-%m-%d)
 runs=0
 for wf in agent-developer.yml agent-reviewer.yml agent-planner.yml; do
-  if ! n=$(gh api "repos/${repo}/actions/workflows/${wf}/runs?created=>=${today}&per_page=100" \
+  # --paginate emits one count per page of 100; sum them.
+  if ! counts=$(gh api --paginate "repos/${repo}/actions/workflows/${wf}/runs?created=>=${today}&per_page=100" \
         --jq '[.workflow_runs[] | select(.event != "schedule" and .conclusion != "skipped")] | length' 2>&1); then
-    fail "Could not count today's runs of ${wf} (AGENTS_GH_TOKEN needs Actions: read), so the daily cap can't be enforced: ${n}"
+    fail "Could not count today's runs of ${wf} (AGENTS_GH_TOKEN needs Actions: read), so the daily cap can't be enforced: ${counts}"
   fi
-  runs=$((runs + n))
+  for n in ${counts}; do
+    runs=$((runs + n))
+  done
 done
 if [ "${runs}" -gt "${cap}" ]; then
   stop "Daily cap reached: ${runs} event-triggered agent runs today (cap ${cap})."

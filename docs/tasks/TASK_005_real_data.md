@@ -72,7 +72,9 @@ class RawManifest:
     manifest_version: str = MANIFEST_VERSION
 
 
-def raw_manifest_path(manifest_dir: Path, dataset: str) -> Path: ...  # <manifest_dir>/<dataset>.yaml
+def raw_manifest_path(
+    manifest_dir: Path, dataset: str
+) -> Path: ...  # <manifest_dir>/<dataset>.yaml
 def write_raw_manifest(path: Path, manifest: RawManifest) -> None: ...
 def read_raw_manifest(path: Path, source: Source) -> RawManifest: ...
 ```
@@ -82,7 +84,12 @@ def read_raw_manifest(path: Path, source: Source) -> RawManifest: ...
 ```python
 def raw_path(data_root: Path, source: Source) -> Path: ...  # <data_root>/raw/<name>/<filename>
 def fetch(
-    source: Source, data_root: Path, manifest_dir: Path, *, today: date | None = None, timeout: float = 60.0
+    source: Source,
+    data_root: Path,
+    manifest_dir: Path,
+    *,
+    today: date | None = None,
+    timeout: float = 60.0,
 ) -> RawManifest: ...
 def verify_raw(source: Source, data_root: Path, manifest_dir: Path) -> RawManifest: ...
 def file_sha256(path: Path) -> tuple[str, int]: ...  # (hex digest, size), read in 1 MiB chunks
@@ -157,7 +164,11 @@ def select_ecl_subset(series: Sequence[HourlySeries], n: int = 20) -> tuple[Hour
 
 ```python
 MAX_HORIZON = 168
-SPLIT_PERCENT = (20, 35, 30)  # warmup, dev, sealed, as integer percent of usable length; reserve gets the rest
+SPLIT_PERCENT = (
+    20,
+    35,
+    30,
+)  # warmup, dev, sealed, as integer percent of usable length; reserve gets the rest
 
 
 @dataclass(frozen=True)
@@ -188,7 +199,9 @@ class PublicSeries:
     split: Split
 
 
-def splits_manifest_path(manifest_dir: Path, dataset: str) -> Path: ...  # <manifest_dir>/<dataset>.splits.yaml
+def splits_manifest_path(
+    manifest_dir: Path, dataset: str
+) -> Path: ...  # <manifest_dir>/<dataset>.splits.yaml
 def prepare(dataset: str, data_root: Path, manifest_dir: Path) -> None: ...
 def load_public(dataset: str, data_root: Path, manifest_dir: Path) -> tuple[PublicSeries, ...]: ...
 ```

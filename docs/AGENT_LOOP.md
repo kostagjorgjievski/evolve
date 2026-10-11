@@ -11,7 +11,7 @@ The developer, reviewer and planner agents run in GitHub Actions and hand work t
 | CI fails on a PR | Developer | Fixes it |
 | Reviewer comments "changes requested" | Developer | Pushes fixes and replies item by item |
 | `[agent:needs-plan]` issue opened | Planner | Writes the next task spec as a PR, or escalates to you at a gate |
-| Every 2 hours | Developer and reviewer | Safety net: picks up anything a missed event left waiting |
+| Every hour (reviewer) / every 2 hours (developer) | Reviewer, developer | Safety net: picks up anything a missed event left waiting |
 
 ## One-time setup
 

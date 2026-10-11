@@ -32,31 +32,34 @@ Defines a world exactly, simulates it, and computes the true-best forecast. No r
 ```python
 @dataclass(frozen=True)
 class Regime:
-    start: int                 # first index where this regime is active
+    start: int  # first index where this regime is active
     level: float
-    slope: float               # per step, measured from `start`
-    season_amp: float          # >= 0
-    season_phase: float        # radians, 0 <= phase < 2*pi
-    ar_phi: float              # -1 < phi < 1
-    sigma: float               # innovation std, > 0
+    slope: float  # per step, measured from `start`
+    season_amp: float  # >= 0
+    season_phase: float  # radians, 0 <= phase < 2*pi
+    ar_phi: float  # -1 < phi < 1
+    sigma: float  # innovation std, > 0
     transition: Literal["sudden", "gradual"]
-    ramp: int                  # 0 if sudden, >= 2 if gradual
-    recurs_from: int | None    # index of an earlier regime this one repeats, or None
+    ramp: int  # 0 if sudden, >= 2 if gradual
+    recurs_from: int | None  # index of an earlier regime this one repeats, or None
+
 
 @dataclass(frozen=True)
 class NoiseBurst:
     start: int
-    length: int                # >= 1
-    sigma_mult: float          # > 1
+    length: int  # >= 1
+    sigma_mult: float  # > 1
+
 
 @dataclass(frozen=True)
 class WorldSpec:
-    length: int                # >= 2
-    period: int                # seasonal period, >= 2
+    length: int  # >= 2
+    period: int  # seasonal period, >= 2
     regimes: tuple[Regime, ...]
     bursts: tuple[NoiseBurst, ...]
 
-def spec_to_dict(spec: WorldSpec) -> dict[str, Any]: ...   # JSON-ready, for hashing and the ledger
+
+def spec_to_dict(spec: WorldSpec) -> dict[str, Any]: ...  # JSON-ready, for hashing and the ledger
 ```
 
 `WorldSpec` validation (each is a separate error case):
@@ -73,19 +76,23 @@ def spec_to_dict(spec: WorldSpec) -> dict[str, Any]: ...   # JSON-ready, for has
 ```python
 def standard_normals(seed: int, n: int) -> tuple[float, ...]: ...
 def simulate_from_innovations(spec: WorldSpec, z: Sequence[float]) -> World: ...
-def simulate(spec: WorldSpec, seed: int) -> World: ...   # = simulate_from_innovations(spec, standard_normals(seed, spec.length))
+def simulate(
+    spec: WorldSpec, seed: int
+) -> World: ...  # = simulate_from_innovations(spec, standard_normals(seed, spec.length))
+
 
 @dataclass(frozen=True)
 class World:
     spec: WorldSpec
-    seed: int | None           # None when built from explicit innovations
-    y: tuple[float, ...]       # observed series
-    mean: tuple[float, ...]    # mu_t
-    noise: tuple[float, ...]   # e_t
-    sigma: tuple[float, ...]   # sigma_t actually used
-    phi: tuple[float, ...]     # phi_t actually used
-    change_points: tuple[int, ...]           # starts of regimes 1..R-1
-    burst_spans: tuple[tuple[int, int], ...] # (start, end exclusive)
+    seed: int | None  # None when built from explicit innovations
+    y: tuple[float, ...]  # observed series
+    mean: tuple[float, ...]  # mu_t
+    noise: tuple[float, ...]  # e_t
+    sigma: tuple[float, ...]  # sigma_t actually used
+    phi: tuple[float, ...]  # phi_t actually used
+    change_points: tuple[int, ...]  # starts of regimes 1..R-1
+    burst_spans: tuple[tuple[int, int], ...]  # (start, end exclusive)
+
 
 def world_fingerprint(world: World) -> str: ...
 ```
@@ -146,32 +153,39 @@ Samples worlds from named families and derives seeds per pool.
 FAMILIES = ("stationary", "sudden", "gradual", "recurring", "false_drift", "mixed")
 CHANGE_KINDS = ("level_shift", "slope_change", "season_change", "noise_change")
 
+
 @dataclass(frozen=True)
 class GrammarConfig:
     length: int = 2000
     period: int = 24
-    warmup: int = 300            # no change point or burst before this index
-    min_segment: int = 200       # minimum gap between consecutive change points
-    max_changes: int = 3         # changes drawn uniformly from 1..max_changes
+    warmup: int = 300  # no change point or burst before this index
+    min_segment: int = 200  # minimum gap between consecutive change points
+    max_changes: int = 3  # changes drawn uniformly from 1..max_changes
     level_range: tuple[float, float] = (-5.0, 5.0)
     slope_range: tuple[float, float] = (-0.002, 0.002)
     new_slope_range: tuple[float, float] = (-0.01, 0.01)
     season_amp_range: tuple[float, float] = (0.0, 3.0)
     phi_range: tuple[float, float] = (0.0, 0.9)
     sigma_range: tuple[float, float] = (0.3, 1.0)
-    shift_range: tuple[float, float] = (2.0, 5.0)   # level shift size, in stationary noise stds
+    shift_range: tuple[float, float] = (2.0, 5.0)  # level shift size, in stationary noise stds
     ramp_range: tuple[int, int] = (20, 150)
     max_bursts: int = 3
     burst_length_range: tuple[int, int] = (10, 50)
     burst_mult_range: tuple[float, float] = (2.0, 4.0)
 
+
 @dataclass(frozen=True)
 class SyntheticTask:
     family: str
     world: World
-    change_kinds: tuple[str, ...]   # aligned with world.change_points; "recurrence" for recurring changes
+    change_kinds: tuple[
+        str, ...
+    ]  # aligned with world.change_points; "recurrence" for recurring changes
 
-def sample_spec(family: str, rng: random.Random, config: GrammarConfig) -> tuple[WorldSpec, tuple[str, ...]]: ...
+
+def sample_spec(
+    family: str, rng: random.Random, config: GrammarConfig
+) -> tuple[WorldSpec, tuple[str, ...]]: ...
 def make_task(family: str, seed: int, config: GrammarConfig = GrammarConfig()) -> SyntheticTask: ...
 def config_to_dict(config: GrammarConfig) -> dict[str, Any]: ...
 ```
@@ -179,8 +193,12 @@ def config_to_dict(config: GrammarConfig) -> dict[str, Any]: ...
 `arena/synthetic/seeds.py`
 
 ```python
-def world_seed(pool: Literal["dev", "sealed"], family: str, index: int, salt: bytes = b"") -> int: ...
-def dev_tasks(family: str, n: int, config: GrammarConfig = GrammarConfig()) -> list[SyntheticTask]: ...
+def world_seed(
+    pool: Literal["dev", "sealed"], family: str, index: int, salt: bytes = b""
+) -> int: ...
+def dev_tasks(
+    family: str, n: int, config: GrammarConfig = GrammarConfig()
+) -> list[SyntheticTask]: ...
 ```
 
 ### Exact behaviour

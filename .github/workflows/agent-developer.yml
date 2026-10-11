@@ -5,8 +5,8 @@ name: Agent - developer
 # state (docs/agents/developer.md), so a missed or merged trigger is harmless.
 
 on:
-  push:
-    branches: [main]
+  # claude-code-action does not support `push`; a merge to main is detected
+  # as a successful CI run for a push to main (workflow_run) instead.
   issue_comment:
     types: [created]
   workflow_run:
@@ -24,13 +24,15 @@ jobs:
   guard:
     if: >-
       vars.AGENTS_PAUSED != 'true' && (
-        github.event_name == 'push' ||
         github.event_name == 'schedule' ||
         github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
           contains(github.event.comment.body, '<!-- agent:changes-requested')) ||
         (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' &&
-          github.event.workflow_run.conclusion == 'failure')
+          github.event.workflow_run.conclusion == 'failure') ||
+        (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.conclusion == 'success')
       )
     runs-on: ubuntu-latest
     outputs:

@@ -6,7 +6,7 @@ The developer, reviewer and planner agents run in GitHub Actions and hand work t
 
 | Event | Agent woken | What it does |
 |---|---|---|
-| A PR merges into `main` | Developer | Starts the next PR of the active task, or opens `[agent:needs-plan]` when the task is finished |
+| CI passes on `main` after a merge | Developer | Starts the next PR of the active task, or opens `[agent:needs-plan]` when the task is finished |
 | CI passes on a PR | Reviewer | Reviews and probes; squash-merges, or comments "changes requested" |
 | CI fails on a PR | Developer | Fixes it |
 | Reviewer comments "changes requested" | Developer | Pushes fixes and replies item by item |

@@ -100,7 +100,8 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
-          run() { uv run --locked --python 3.11 evolvets "$@"; }
+          run() { bash .github/scripts/run-logged.sh "data/cache step" uv run --locked --python 3.11 evolvets "$@"; }
+          uv --version; python3.11 --version || true; which -a python3.11 python3 || true
           if [ "$DATASET" != "synthetic-dev" ]; then
             run data verify "$DATASET" --data-root "$DATA_ROOT" \
               || { run data fetch "$DATASET" --data-root "$DATA_ROOT"; \
@@ -113,7 +114,7 @@ jobs:
       - name: Smoke check on the GPU
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          uv run --locked --python 3.11 --group "$GROUP" \
+          bash .github/scripts/run-logged.sh "smoke" uv run --locked --python 3.11 --group "$GROUP" \
             evolvets foundation smoke --model "$MODEL" --device cuda
       - name: Build the foundation cache
         run: |
@@ -122,12 +123,14 @@ jobs:
           args=(--dataset "$DATASET" --model "$MODEL" --device cuda --batch-size "$BATCH_SIZE"
                 --root "$FM_ROOT" --cache-root "$CACHE_ROOT" --data-root "$DATA_ROOT")
           if [ "$DATASET" = "synthetic-dev" ]; then args+=(--per-family "$PER_FAMILY"); fi
-          uv run --locked --python 3.11 --group "$GROUP" evolvets foundation build "${args[@]}"
+          bash .github/scripts/run-logged.sh "foundation build" uv run --locked --python 3.11 \
+            --group "$GROUP" evolvets foundation build "${args[@]}"
       - name: Verify the cache against its manifest
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          uv run --locked --python 3.11 --group "$GROUP" \
-            evolvets foundation verify --dataset "$DATASET" --model "$MODEL" --root "$FM_ROOT"
+          bash .github/scripts/run-logged.sh "foundation verify" uv run --locked --python 3.11 \
+            --group "$GROUP" evolvets foundation verify --dataset "$DATASET" --model "$MODEL" \
+            --root "$FM_ROOT"
       - name: Release GPU lock
         if: always()
         run: |

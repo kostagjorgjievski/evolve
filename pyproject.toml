@@ -17,6 +17,17 @@ dev = [
     "pre-commit>=3.8",
     "import-linter>=2.0",
 ]
+# TASK_009 PR C: one optional group per foundation model, each with its library
+# and the pinned torch (2.6.* bundles CUDA 12.4, matching the lab GPU driver).
+# Never add these to [project] dependencies or dev; CI installs only dev.
+fm-chronos = [
+    "chronos-forecasting>=2.0,<3",
+    "torch==2.6.*",
+    # chronos declares transformers>=4.41,<6, but 5.x imports through
+    # torch.accelerator.current_accelerator(), which raises on a CPU-only
+    # machine under torch 2.6 — and the adapters must also run on CPU.
+    "transformers>=4.41,<5",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -47,11 +58,26 @@ module = [
     "evolvets.ledger.*",
     "evolvets.cache.*",
     "evolvets.experts.*",
-    "evolvets.foundation.*",  # models/ wrappers get their own non-strict override in TASK_009 PR C
+    "evolvets.foundation.*",
     "evolvets.updater.interfaces",
 ]
 strict = true
 
+[[tool.mypy.overrides]]
+# The model wrappers in foundation/models/ call pretrained-model libraries
+# that ship no type stubs and are absent from the dev environment mypy runs
+# in (TASK_009 installs them per model in the fm-* groups). Definitions stay
+# fully typed; only the calls into those libraries are relaxed. (The import
+# errors are disabled per error code because per-module ignore_missing_imports
+# no longer silences them on this mypy.)
+module = ["evolvets.foundation.models", "evolvets.foundation.models.*"]
+disallow_untyped_calls = false
+warn_return_any = false
+disable_error_code = ["import-not-found", "import-untyped"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "foundation: needs a real foundation-model library (runs in the GPU workflow, not CI)",
+]

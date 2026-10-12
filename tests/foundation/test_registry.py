@@ -16,6 +16,7 @@ def test_registry_order_and_fields():
         assert set(spec.pretraining_overlap) == {"etth1", "ecl"}
         assert all(value in {"yes", "no", "unknown"} for value in spec.pretraining_overlap.values())
         assert spec.overlap_source.startswith(("http://", "https://"))
+        assert spec.quantile_method  # "native", "closed-form", ...; "unknown" until PR C
         assert MODELS[spec.name] is spec
 
 

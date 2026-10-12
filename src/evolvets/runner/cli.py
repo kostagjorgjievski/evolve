@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Iterator
+from dataclasses import asdict
 from pathlib import Path
 
 from evolvets import __version__
@@ -33,7 +35,10 @@ from evolvets.cache.store import (
 )
 from evolvets.foundation.errors import FoundationError
 from evolvets.foundation.fake import FAKE_SPEC, FakeAdapter
-from evolvets.foundation.registry import MODELS, ModelSpec
+from evolvets.foundation.interfaces import Adapter
+from evolvets.foundation.models import load_adapter, require_adapter_module
+from evolvets.foundation.registry import MODELS, ModelSpec, get_spec
+from evolvets.foundation.smoke import run_smoke
 from evolvets.foundation.store import (
     build_foundation_cache,
     compare_rebuild,
@@ -129,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         choices=_FOUNDATION_MODELS,
         required=True,
-        help="which model ('fake' for tests and CI; the pretrained models arrive in TASK_009 PR C)",
+        help="which model ('fake' for tests and CI; real models resolve through their adapters)",
     )
     foundation_build.add_argument(
         "--root", default="foundation_cache", help="foundation cache root directory"
@@ -148,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--device",
         choices=["auto", "cpu", "cuda"],
         default="auto",
-        help="adapter device; auto uses CUDA when available (real models arrive in TASK_009 PR C)",
+        help="adapter device; auto uses CUDA when available",
     )
     foundation_build.add_argument(
         "--per-family", type=int, help="synthetic tasks per family; required for synthetic-dev"
@@ -163,7 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         choices=_FOUNDATION_MODELS,
         required=True,
-        help="which model ('fake' for tests and CI; the pretrained models arrive in TASK_009 PR C)",
+        help="which model ('fake' for tests and CI; real models resolve through their adapters)",
     )
     foundation_verify.add_argument(
         "--root", default="foundation_cache", help="foundation cache root directory"
@@ -179,7 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         choices=_FOUNDATION_MODELS,
         required=True,
-        help="which model ('fake' for tests and CI; the pretrained models arrive in TASK_009 PR C)",
+        help="which model ('fake' for tests and CI; real models resolve through their adapters)",
     )
     foundation_compare.add_argument(
         "--root", default="foundation_cache", help="foundation cache root directory"
@@ -193,6 +198,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     foundation_compare.add_argument(
         "--seed", type=int, required=True, help="seed for the origin sample"
+    )
+    foundation_smoke = foundation_sub.add_parser(
+        "smoke",
+        help="forecast a fixed series at 20 origins and check batching and accuracy",
+    )
+    foundation_smoke.add_argument(
+        "--model",
+        choices=_FOUNDATION_MODELS,
+        required=True,
+        help="which model ('fake' runs torch-free; real models need their fm-* group)",
+    )
+    foundation_smoke.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="adapter device; auto uses CUDA when available",
     )
 
     sealed = subparsers.add_parser(
@@ -343,23 +364,13 @@ def _cmd_cache(
     return 1 if failed else 0
 
 
-def _require_fake_model(model: str) -> None:
-    """Refuse a real model name: its adapter arrives with TASK_009 PR C."""
-    if model != "fake":
-        raise FoundationError(
-            f"model {model!r} arrives with TASK_009 PR C (feat/foundation-models); "
-            "only --model fake can run today"
-        )
-
-
-def _foundation_adapter(model: str, device: str) -> tuple[FakeAdapter, ModelSpec]:
-    """Resolve ``--model`` to an adapter and its spec; today only the fake exists."""
-    _require_fake_model(model)
-    if device == "cuda":
-        raise FoundationError(
-            "--device cuda needs a real model (TASK_009 PR C); the fake adapter runs on cpu"
-        )
-    return FakeAdapter(), FAKE_SPEC
+def _foundation_adapter(model: str, device: str) -> tuple[Adapter, ModelSpec]:
+    """Resolve ``--model`` to an adapter and its spec; ``fake`` stays torch-free."""
+    if model == "fake":
+        if device == "cuda":
+            raise FoundationError("--device cuda needs a real model; the fake adapter runs on cpu")
+        return FakeAdapter(), FAKE_SPEC
+    return load_adapter(model, device), get_spec(model)
 
 
 def _cmd_foundation_build(
@@ -399,7 +410,8 @@ def _cmd_foundation_build(
 def _cmd_foundation_verify(dataset: str, model: str, root: str) -> int:
     """Verify one (dataset, model) cache against its manifest; FAIL names the fault."""
     try:
-        _require_fake_model(model)
+        if model != "fake":
+            require_adapter_module(model)  # no heavy load: verify only reads bytes
         manifest = verify_foundation_cache(Path(root), dataset, model)
         ident = foundation_cache_id(Path(root), dataset, model)
     except (FoundationError, CacheError, ValueError, OSError) as exc:
@@ -441,6 +453,18 @@ def _cmd_foundation_compare(
         f"{report.n_nonfinite} non-finite values"
     )
     return 0
+
+
+def _cmd_foundation_smoke(model: str, device: str) -> int:
+    """Run the smoke check on one model; one JSON line, nonzero when a check fails."""
+    try:
+        adapter, spec = _foundation_adapter(model, device)
+        report = run_smoke(spec, adapter)
+    except FoundationError as exc:
+        print(f"FAIL smoke/{model}: {exc}")
+        return 1
+    print(json.dumps(asdict(report)))
+    return 0 if report.ok else 1
 
 
 def _cmd_sealed_init(per_family: int, data_root: str, manifest_dir: str) -> int:
@@ -521,6 +545,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.foundation_command == "verify":
             return _cmd_foundation_verify(args.dataset, args.model, args.root)
+        if args.foundation_command == "smoke":
+            return _cmd_foundation_smoke(args.model, args.device)
         if args.foundation_command == "compare":
             return _cmd_foundation_compare(
                 args.dataset,

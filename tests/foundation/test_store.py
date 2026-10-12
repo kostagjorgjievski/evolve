@@ -379,11 +379,12 @@ def test_manifest_has_every_required_field(env: SimpleNamespace) -> None:
         "pip_package",
         "dependency_group",
         "max_context",
+        "quantile_method",
         "license",
         "pretraining_overlap",
         "overlap_source",
     }
-    assert obj["foundation_cache_version"] == FOUNDATION_CACHE_VERSION == "1"
+    assert obj["foundation_cache_version"] == FOUNDATION_CACHE_VERSION == "2"
     assert obj["dataset"] == "etth1"
     assert obj["source"] == env.source
     assert obj["horizon"] == _HORIZON
@@ -409,7 +410,7 @@ def test_tampered_manifests_are_refused(env: SimpleNamespace) -> None:
         with pytest.raises(FoundationError, match=label):
             read_foundation_manifest(env.root, "etth1", "fake")
 
-    tamper({**original, "foundation_cache_version": "2"}, "refused")
+    tamper({**original, "foundation_cache_version": "3"}, "refused")
     tamper({k: v for k, v in original.items() if k != "dtype"}, "keys must be exactly")
     tamper(
         {**original, "quantiles": [0.1, 0.2, 0.3, 0.4, 0.55, 0.6, 0.7, 0.8, 0.9]},
@@ -437,7 +438,7 @@ def test_golden_manifest_hash_pins_the_layout(env: SimpleNamespace) -> None:
     obj["build_seconds"] = 0.0
     obj["library_versions"] = {}
     assert sha256_hex(canonical_bytes(obj)) == (
-        "74fd51f069912fcb1a7f19fe4703f190ced0c25350fd1ab9b6de8270fea4f856"
+        "b090b9754cbdec19b2949691e77fc55d185fd042abc4baf094a5271322aee3ce"
     )
 
 

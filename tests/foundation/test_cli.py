@@ -1,8 +1,9 @@
 """CLI tests for ``evolvets foundation``: build, verify, compare with the fake adapter.
 
-TASK_009 PR B test 10. Real model names must fail with a clear message until
-their adapters arrive in PR C, and every command runs end to end with
-``--model fake`` on the deterministic ETTh1 fixture (no network).
+TASK_009 PR B test 10, updated by PR C1: chronos2 now resolves through its
+adapter (see test_models.py), while a model whose adapter module has not
+arrived still fails naming the PR that adds it. Every command runs end to
+end with ``--model fake`` on the deterministic ETTh1 fixture (no network).
 """
 
 from __future__ import annotations
@@ -93,26 +94,25 @@ def test_build_with_device_cuda_is_refused_for_the_fake(
     """--device cuda means a real model's device; the fake runs on cpu."""
     assert cli.main([*_foundation_args("build", env), "--device", "cuda"]) == 1
     assert capsys.readouterr().out.splitlines() == [
-        "FAIL etth1/fake: --device cuda needs a real model (TASK_009 PR C); "
-        "the fake adapter runs on cpu"
+        "FAIL etth1/fake: --device cuda needs a real model; the fake adapter runs on cpu"
     ]
     assert not (env.root / "etth1").exists()
 
 
-def test_real_model_names_arrive_with_pr_c(
+def test_unadded_model_names_arrive_with_pr_c(
     env: SimpleNamespace, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Every command refuses a real model name with a message naming PR C."""
+    """Commands refuse a model whose adapter module is absent, naming the PR that adds it."""
     for model, argv in (
-        ("chronos2", _foundation_args("build", env, model="chronos2")),
         ("tirex", _foundation_args("verify", env, model="tirex")),
         ("toto", [*_foundation_args("compare", env, model="toto"), "--sample", "5", "--seed", "0"]),
+        ("moirai2", _foundation_args("build", env, model="moirai2")),
     ):
         assert cli.main(argv) == 1
         out = capsys.readouterr().out.splitlines()
         assert len(out) == 1, out
         assert out[0].startswith(f"FAIL etth1/{model}: ")
-        assert "TASK_009 PR C" in out[0] and "feat/foundation-models" in out[0]
+        assert "TASK_009 PR C" in out[0] and f"feat/foundation-models-{model}" in out[0]
     assert not env.root.exists()
 
 

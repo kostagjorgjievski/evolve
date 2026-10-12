@@ -1,9 +1,10 @@
 """CLI tests for ``evolvets foundation``: build, verify, compare with the fake adapter.
 
-TASK_009 PR B test 10, updated by PR C1: chronos2 now resolves through its
-adapter (see test_models.py), while a model whose adapter module has not
-arrived still fails naming the PR that adds it. Every command runs end to
-end with ``--model fake`` on the deterministic ETTh1 fixture (no network).
+TASK_009 PR B test 10, updated by PR C: real models resolve through their
+adapters (see test_models.py), while a dropped model whose adapter module was
+never added still fails, naming the drop as permanent. Every command runs
+end to end with ``--model fake`` on the deterministic ETTh1 fixture (no
+network).
 """
 
 from __future__ import annotations
@@ -99,12 +100,11 @@ def test_build_with_device_cuda_is_refused_for_the_fake(
     assert not (env.root / "etth1").exists()
 
 
-def test_unadded_model_names_arrive_with_pr_c(
+def test_dropped_model_names_refuse_commands(
     env: SimpleNamespace, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Commands refuse a model whose adapter module is absent, naming the PR that adds it."""
+    """Commands refuse a dropped model's absent adapter module, naming the drop as permanent."""
     for model, argv in (
-        ("timesfm25", _foundation_args("verify", env, model="timesfm25")),
         ("toto", [*_foundation_args("compare", env, model="toto"), "--sample", "5", "--seed", "0"]),
         ("moirai2", _foundation_args("build", env, model="moirai2")),
     ):
@@ -112,7 +112,7 @@ def test_unadded_model_names_arrive_with_pr_c(
         out = capsys.readouterr().out.splitlines()
         assert len(out) == 1, out
         assert out[0].startswith(f"FAIL etth1/{model}: ")
-        assert "TASK_009 PR C" in out[0] and f"feat/foundation-models-{model}" in out[0]
+        assert "TASK_009 PR C" in out[0] and "none is planned" in out[0]
     assert not env.root.exists()
 
 

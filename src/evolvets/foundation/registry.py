@@ -1,11 +1,13 @@
 """The registry of foundation models a forecast cache can be built from.
 
 Every value here was read from the model's official Hugging Face card, its
-training-corpus listing on the Hub, or PyPI. Where a fact could not be
-verified it is the literal string ``"unknown"`` (TASK_009: never guess a
-value); PR C re-verifies each entry and pins ``hf_revision`` to a commit
-hash. ``max_context`` is ``0`` (unset) until PR C reads it from the model
-card, capped at 4096.
+training-corpus listing on the Hub, PyPI, or the model library's own
+documentation. Where a fact could not be verified it is the literal string
+``"unknown"`` (TASK_009: never guess a value). PR C pins each model's
+``hf_revision`` to a commit hash, verifies ``max_context`` from the model
+card (capped at 4096) and fills ``quantile_method`` from what the library
+actually returns; a model still waiting for its PR keeps its PR A
+placeholder entry, with ``hf_revision = "unpinned"``.
 """
 
 from dataclasses import dataclass
@@ -29,19 +31,32 @@ class ModelSpec:
     pip_package: str
     dependency_group: str  # "fm-chronos", ...
     max_context: int  # L; 0 (unset) until PR C verifies the model card
+    quantile_method: str  # how the adapter obtains QUANTILES; "unknown" until PR C
     license: str  # SPDX id or the license's name, as on the model card
     pretraining_overlap: dict[str, str]  # dataset -> "yes" | "no" | "unknown"
     overlap_source: str  # URL of the page the overlap entries were read from
 
 
 MODELS: dict[str, ModelSpec] = {
+    # Facts verified 2026-10-12 for PR C1 (feat/foundation-models-chronos2):
+    # model card https://huggingface.co/amazon/chronos-2 (max context 8192,
+    # capped at 4096 by TASK_009; Apache-2.0; F32 weights; pip package
+    # "chronos-forecasting>=2.0", whose Chronos2Pipeline.predict_quantiles
+    # natively returns the training levels 0.1 .. 0.9 = QUANTILES), commit
+    # hash from https://huggingface.co/api/models/amazon/chronos-2 field
+    # "sha". Overlap read from the card's corpus listing: "electricity_15min"
+    # (UCI ElectricityLoadDiagrams2011_2014, the ECL source) is included, so
+    # ecl is "yes"; etth1 is not in that listing, but the card names a second
+    # corpus (Salesforce/GiftEvalPretrain) whose contents were not verified
+    # within the lookup time box, so etth1 stays "unknown".
     "chronos2": ModelSpec(
         name="chronos2",
         hf_model_id="amazon/chronos-2",
-        hf_revision="unpinned",
+        hf_revision="29ec3766d36d6f73f0696f85560a422f50e8498c",
         pip_package="chronos-forecasting",
         dependency_group="fm-chronos",
-        max_context=0,
+        max_context=4096,
+        quantile_method="native",
         license="apache-2.0",
         pretraining_overlap={"etth1": "unknown", "ecl": "yes"},
         overlap_source="https://huggingface.co/datasets/autogluon/chronos_datasets",
@@ -53,6 +68,7 @@ MODELS: dict[str, ModelSpec] = {
         pip_package="tirex-ts",
         dependency_group="fm-tirex",
         max_context=0,
+        quantile_method="unknown",
         license="nx-ai-community-license",
         pretraining_overlap={"etth1": "unknown", "ecl": "yes"},
         overlap_source="https://huggingface.co/datasets/autogluon/chronos_datasets",
@@ -65,6 +81,7 @@ MODELS: dict[str, ModelSpec] = {
         pip_package="unknown",  # depends on the generation chosen for hf_model_id
         dependency_group="fm-toto",
         max_context=0,
+        quantile_method="unknown",
         license="apache-2.0",  # both generations' cards say apache-2.0
         pretraining_overlap={"etth1": "unknown", "ecl": "yes"},
         overlap_source="https://huggingface.co/datasets/autogluon/chronos_datasets",
@@ -76,6 +93,7 @@ MODELS: dict[str, ModelSpec] = {
         pip_package="uni2ts",
         dependency_group="fm-moirai",
         max_context=0,
+        quantile_method="unknown",
         license="cc-by-nc-4.0",
         pretraining_overlap={"etth1": "yes", "ecl": "yes"},
         overlap_source="https://huggingface.co/Salesforce/moirai-2.0-R-small",
@@ -87,6 +105,7 @@ MODELS: dict[str, ModelSpec] = {
         pip_package="timesfm",
         dependency_group="fm-timesfm",
         max_context=0,
+        quantile_method="unknown",
         license="apache-2.0",
         pretraining_overlap={"etth1": "no", "ecl": "no"},
         overlap_source="https://huggingface.co/google/timesfm-2.5-200m-pytorch",

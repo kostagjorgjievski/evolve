@@ -62,6 +62,7 @@ FAKE_SPEC = ModelSpec(
     pip_package="none",
     dependency_group="none",
     max_context=512,
+    quantile_method="closed-form",
     license="none",
     pretraining_overlap={"etth1": "no", "ecl": "no"},
     overlap_source="none",

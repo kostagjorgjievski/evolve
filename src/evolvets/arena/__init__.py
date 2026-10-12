@@ -3,9 +3,10 @@
 ``ARENA_VERSION`` is the protocol version runs put in
 ``run_start.protocol_versions["arena"]``. The arena protocol covers
 ``updater/interfaces.py``, ``arena/labels.py``, ``arena/replay.py``,
-``arena/dev.py``, ``arena/metrics.py`` and ``arena/evaluate.py``: any change
-that alters what an updater receives, what it may return, which origins are
-scored or any metric value must bump it. This file stays import-free.
+``arena/dev.py``, ``arena/metrics.py``, ``arena/evaluate.py`` and
+``arena/sealed/``: any change that alters what an updater receives, what it
+may return, which origins are scored, any metric value, or what the sealed
+process layout promises a caller must bump it. This file stays import-free.
 """
 
 ARENA_VERSION = "1"

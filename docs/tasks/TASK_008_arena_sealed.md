@@ -1,4 +1,4 @@
-Status: active
+Status: done (PR A merged as #41; PR B split by the size rule: salt and synthetic sealed inputs in #43, real sealed pools, caches and CLI in #46; PR C split by the size rule: per-series workers and the remote proxy in #51, the sealed server and its client in #54)
 
 # Task 008: Baseline status in the ledger, sealed pools and the sealed server process
 

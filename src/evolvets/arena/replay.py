@@ -183,8 +183,9 @@ def replay_series(
 ) -> SeriesTrace:
     """Replay one series: run the updater origin by origin and score its combinations.
 
-    ``expert_names`` names the pool the forecasts hold, in pool order; the
-    default is the simple five. Feedback for origin ``s`` arrives at exactly
+    ``expert_names`` names the pool the forecasts hold, one name per forecast
+    row, in pool order; the default is the simple five. Feedback for origin
+    ``s`` arrives at exactly
     ``s + horizon``, once, as :class:`~evolvets.updater.interfaces.Matured`;
     the last ``min(horizon, end_origin - first_origin)`` origins are matured
     in a final drain with no further ``update`` calls. Raises
@@ -194,7 +195,13 @@ def replay_series(
     horizon = _require_int("horizon", horizon, 1)
     names = _checked_expert_names(expert_names)
     n_experts = len(names)
-    for forecast_row in forecasts.at(forecasts.first_origin):
+    first_rows = forecasts.at(forecasts.first_origin)
+    if len(first_rows) != n_experts:
+        raise ArenaError(
+            f"expert_names holds {n_experts} names, but the forecasts hold "
+            f"{len(first_rows)} rows at the first origin {forecasts.first_origin}"
+        )
+    for forecast_row in first_rows:
         if len(forecast_row) != horizon:
             raise ArenaError(
                 f"horizon {horizon} does not match the cached forecasts' row length "

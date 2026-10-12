@@ -354,6 +354,45 @@ def test_no_look_ahead_with_the_larger_pool(synthetic_env: dict[str, Path]) -> N
     assert spy_a.calls[:n_recorded] == spy_b.calls[:n_recorded]
 
 
+# --- the forecast rows must match expert_names, or the replay is refused ---------------------
+
+
+def test_replay_refuses_forecasts_that_do_not_match_expert_names(
+    synthetic_env: dict[str, Path],
+) -> None:
+    """A 6-row pool replayed with 5 or 7 names raises ArenaError before init.
+
+    The pool spec made the expert count a parameter, and nothing else ties
+    ``expert_names`` to the forecast rows, so ``replay_series`` itself must
+    refuse a mismatch before the updater runs: five names over six rows would
+    silently drop the foundation expert and break the ``Context`` invariant,
+    and seven names would crash the combination loop with a bare ``IndexError``
+    instead of an ``ArenaError``.
+    """
+    build_fake_cache(synthetic_env)
+    pool = load_pooled(synthetic_env, ("fake",))
+    series = pool.series[0]
+    joined = load_pool_forecasts(pool, series.series_id)
+    assert len(joined.at(joined.first_origin)) == len(EXPERT_NAMES) + 1  # six rows
+    for names in (None, EXPERT_NAMES, (*EXPERT_NAMES, "a", "b")):  # default, five, seven
+        kwargs = {} if names is None else {"expert_names": names}
+        updater = RecordingUpdater()
+        with pytest.raises(ArenaError, match="rows at the first origin"):
+            replay_series(
+                updater,
+                {},
+                0,
+                series.series_id,
+                joined,
+                series.values,
+                series.period,
+                pool.manifest.horizon,
+                series.score_end,
+                **kwargs,
+            )
+        assert updater.init_n_experts is None
+
+
 # --- Test 6: the leakage flag ----------------------------------------------------------------
 
 

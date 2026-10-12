@@ -15,10 +15,14 @@ RUN if [ -n "$APT_MIRROR" ]; then \
         sed -i "s#http://archive.ubuntu.com#http://${APT_MIRROR}#g; s#http://security.ubuntu.com#http://${APT_MIRROR}#g" /etc/apt/sources.list; \
     fi \
     && apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git jq tar gzip xz-utils python3 \
+        ca-certificates curl git jq tar gzip xz-utils python3 python3.11 python3.11-venv \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -u 1000 -s /bin/bash runner
+RUN useradd -m -u 1000 -s /bin/bash runner \
+    && mkdir -p /data && chown runner:runner /data
+# /data is meant for a named volume (-v evolve-data:/data): model weights,
+# uv's package cache and built forecast caches survive container rebuilds.
+ENV EVOLVETS_DATA=/data HF_HOME=/data/hf UV_CACHE_DIR=/data/uv-cache
 WORKDIR /home/runner/actions-runner
 
 # Latest official runner release at build time (actions/runner on GitHub).

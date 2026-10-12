@@ -26,6 +26,7 @@ forbidden_modules =
     evolvets.arena.synthetic
     evolvets.arena.realdata
     evolvets.cache
+    evolvets.foundation
 
 [importlinter:contract:updater-isolation]
 name = Updaters see data only through the replay loop
@@ -35,5 +36,6 @@ source_modules =
 forbidden_modules =
     evolvets.arena
     evolvets.experts
+    evolvets.foundation
     evolvets.ledger
     evolvets.runner

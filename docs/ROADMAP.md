@@ -33,11 +33,11 @@ Goal: answer question 1 and have every piece of measurement infrastructure froze
 
 **Gate 1 decision:** if headroom over the best tuned baseline is small, harden the generator (PR 5) before Phase 1.
 
-Parallel track, started as soon as PR 8 lands:
+Parallel track (PR 8 has landed; entry 12 approved by the owner on 2026-10-12):
 
 | # | Branch | Content |
 |---|---|---|
-| 12 | `feat/foundation-experts` | Chronos-2, TiRex, Toto, Moirai, TimesFM in the expert pool (needs approval for heavy dependencies and GPU) |
+| 12 | `feat/foundation-experts` | Chronos-2, TiRex, Toto, Moirai 2.0, TimesFM 2.5 as cached experts, built on the lab GPU (approved; TASK_009) |
 | 13 | `feat/live-commit` | Daily public, timestamped forecast commitments from generation 0 onward |
 
 ## Phase 1: the loop with an API LLM (questions 2 and 3)

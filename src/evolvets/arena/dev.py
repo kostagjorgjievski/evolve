@@ -6,8 +6,13 @@ window the MASE scale is read from. Synthetic pools also carry their change
 points and the true-best forecasts the oracle metrics need. Nothing here holds
 a value past the last scored target: ``values`` is truncated to
 ``[: score_end + horizon]`` after the hash check.
+
+The sealed pools (``arena/sealed/pools.py``) reuse these types and helpers
+unchanged, so a replay cannot tell a sealed pool from a dev pool apart from
+its boundaries; the type names are historical.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -45,7 +50,7 @@ class DevSeries:
 class DevPool:
     """A cache plus the public series to replay over, in cache manifest order."""
 
-    dataset: str  # one of CACHE_DATASETS
+    dataset: str  # one of CACHE_DATASETS (dev) or SEALED_DATASETS (sealed)
     cache_root: Path
     cache_id: str
     manifest: CacheManifest
@@ -103,10 +108,10 @@ def _real_series(
             raise ArenaError(
                 f"{entry.series_id}: the cache records period {entry.period}, not {_REAL_PERIOD}"
             )
-        _match_values(entry, loaded.values)
+        match_values(entry, loaded.values)
         warmup, dev, _sealed, _reserve = loaded.split.segments
         out.append(
-            _checked_series(
+            checked_series(
                 entry,
                 loaded.values,
                 manifest.horizon,
@@ -146,9 +151,26 @@ def _synthetic_series(manifest: CacheManifest) -> tuple[DevSeries, ...]:
             f"{manifest.dataset}: {per_family} series per family is {len(expected)} series, "
             f"but the cache holds {len(manifest.series)}"
         )
+    return checked_synthetic_series(manifest, expected)
+
+
+def checked_synthetic_series(
+    manifest: CacheManifest, tasks: Sequence[tuple[str, SyntheticTask]]
+) -> tuple[DevSeries, ...]:
+    """Check ``tasks`` against a synthetic ``manifest`` and build the scored series.
+
+    Shared by the dev pool and the sealed synthetic pool: ids in manifest
+    order, each world's period, the values' hash, warmup boundaries, change
+    points and the oracle from :func:`true_best_forecast`.
+    """
+    if len(tasks) != len(manifest.series):
+        raise ArenaError(
+            f"{manifest.dataset}: {len(tasks)} synthetic tasks, but the cache holds "
+            f"{len(manifest.series)} series"
+        )
     warmup = GrammarConfig().warmup
     out: list[DevSeries] = []
-    for entry, (expected_id, task) in zip(manifest.series, expected, strict=True):
+    for entry, (expected_id, task) in zip(manifest.series, tasks, strict=True):
         if entry.series_id != expected_id:
             raise ArenaError(
                 f"{manifest.dataset}: cache series {entry.series_id!r} where task "
@@ -160,9 +182,9 @@ def _synthetic_series(manifest: CacheManifest) -> tuple[DevSeries, ...]:
                 f"{entry.series_id}: the cache records period {entry.period}, but the world "
                 f"has {world.spec.period}"
             )
-        _match_values(entry, world.y)
+        match_values(entry, world.y)
         score_end = entry.length - manifest.horizon
-        series = _checked_series(
+        series = checked_series(
             entry,
             world.y,
             manifest.horizon,
@@ -180,7 +202,7 @@ def _synthetic_series(manifest: CacheManifest) -> tuple[DevSeries, ...]:
     return tuple(out)
 
 
-def _match_values(entry: CachedSeries, values: tuple[float, ...]) -> None:
+def match_values(entry: CachedSeries, values: tuple[float, ...]) -> None:
     """Check the public values against the cache's hash and length."""
     digest = sha256_hex(canonical_bytes(list(values)))
     if digest != entry.values_sha256:
@@ -194,7 +216,7 @@ def _match_values(entry: CachedSeries, values: tuple[float, ...]) -> None:
         )
 
 
-def _checked_series(
+def checked_series(
     entry: CachedSeries,
     values: tuple[float, ...],
     horizon: int,

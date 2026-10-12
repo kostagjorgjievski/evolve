@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from evolvets import __version__
+from evolvets.arena.errors import ArenaError
 from evolvets.arena.realdata import sources
 from evolvets.arena.realdata.fetch import FetchError, fetch, file_sha256, verify_raw
 from evolvets.arena.realdata.manifest import ManifestError, RawManifest
@@ -15,6 +16,12 @@ from evolvets.arena.realdata.prepare import (
     prepare,
     read_split_manifest,
     splits_manifest_path,
+)
+from evolvets.arena.sealed.names import SEALED_DATASETS
+from evolvets.arena.sealed.pools import (
+    build_sealed_cache,
+    init_salt,
+    synthetic_manifest_path,
 )
 from evolvets.cache.datasets import CACHE_DATASETS, public_inputs
 from evolvets.cache.store import (
@@ -91,6 +98,42 @@ def build_parser() -> argparse.ArgumentParser:
                 type=int,
                 help="synthetic tasks per family; required for synthetic-dev (and 'all')",
             )
+
+    sealed = subparsers.add_parser(
+        "sealed", help="sealed salt creation and sealed cache build (trusted, human-started)"
+    )
+    sealed_sub = sealed.add_subparsers(dest="sealed_command", metavar="SEALED-COMMAND")
+    init_salt_cmd = sealed_sub.add_parser(
+        "init-salt", help="create the sealed synthetic salt and its manifest, once"
+    )
+    init_salt_cmd.add_argument(
+        "--per-family", type=int, required=True, help="sealed synthetic worlds per family"
+    )
+    init_salt_cmd.add_argument("--data-root", default="data", help="data root directory")
+    init_salt_cmd.add_argument(
+        "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+    )
+    build_sealed = sealed_sub.add_parser(
+        "build-cache", help="compute the sealed pools' forecasts and install them as caches"
+    )
+    build_sealed.add_argument(
+        "dataset", choices=[*SEALED_DATASETS, "all"], help="which dataset (or 'all')"
+    )
+    build_sealed.add_argument("--data-root", default="data", help="data root directory")
+    build_sealed.add_argument(
+        "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+    )
+    build_sealed.add_argument(
+        "--sealed-cache-root",
+        default="data/sealed_cache",
+        help="sealed cache root directory (never the public cache root)",
+    )
+    build_sealed.add_argument(
+        "--horizon",
+        type=int,
+        default=DEFAULT_HORIZON,
+        help="forecast horizon to cache (default: 24)",
+    )
     return parser
 
 
@@ -204,6 +247,36 @@ def _cmd_cache(
     return 1 if failed else 0
 
 
+def _cmd_sealed_init(per_family: int, data_root: str, manifest_dir: str) -> int:
+    """Create (or confirm) the sealed salt; print its hash, never the salt itself."""
+    try:
+        digest = init_salt(Path(data_root), Path(manifest_dir), per_family)
+    except (ArenaError, ValueError, OSError) as exc:
+        print(f"FAIL init-salt: {exc}")
+        return 1
+    manifest_file = synthetic_manifest_path(Path(manifest_dir))
+    print(f"OK init-salt: salt sha256 {digest}; manifest {manifest_file}")
+    return 0
+
+
+def _cmd_sealed_build(
+    dataset: str, data_root: str, manifest_dir: str, sealed_cache_root: str, horizon: int
+) -> int:
+    """Build each requested sealed cache, one OK/FAIL line per dataset."""
+    failed = False
+    root, data, manifests = Path(sealed_cache_root), Path(data_root), Path(manifest_dir)
+    for name in SEALED_DATASETS if dataset == "all" else (dataset,):
+        try:
+            manifest = build_sealed_cache(name, data, manifests, root, horizon=horizon)
+            ident = cache_id(root, name)
+        except (ArenaError, CacheError, ValueError, OSError) as exc:
+            failed = True
+            print(f"FAIL {name}: {exc}")
+        else:
+            print(f"OK {name}: {len(manifest.series)} series, cache {ident}")
+    return 1 if failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the EvolveTS CLI."""
     parser = build_parser()
@@ -234,6 +307,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.cache_command == "verify":
             return _cmd_cache(
                 "verify", args.dataset, args.cache_root, args.data_root, args.manifest_dir
+            )
+        parser.print_help()
+        return 0
+    if args.command == "sealed":
+        if args.sealed_command == "init-salt":
+            return _cmd_sealed_init(args.per_family, args.data_root, args.manifest_dir)
+        if args.sealed_command == "build-cache":
+            return _cmd_sealed_build(
+                args.dataset,
+                args.data_root,
+                args.manifest_dir,
+                args.sealed_cache_root,
+                horizon=args.horizon,
             )
         parser.print_help()
         return 0

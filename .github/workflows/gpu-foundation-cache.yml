@@ -131,6 +131,14 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           bash .github/scripts/run-logged.sh "foundation verify" "$VENV/bin/evolvets" \
             foundation verify --dataset "$DATASET" --model "$MODEL" --root "$FM_ROOT"
+      - name: Upload the manifest (hashes only, no forecasts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundation-manifest-${{ inputs.dataset }}-${{ inputs.model }}
+          path: ${{ env.FM_ROOT }}/${{ inputs.dataset }}/${{ inputs.model }}/manifest.json
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Release GPU lock
         if: always()
         run: |

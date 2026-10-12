@@ -1,11 +1,14 @@
-"""The sealed synthetic pool: its salt, its manifest and its inputs.
+"""Sealed pools: the salt, the sealed inputs, and the caches and pools built from them.
 
 Everything here runs in trusted, human-started processes (the ``evolvets
 sealed`` CLI, and from PR C on the sealed server). The synthetic worlds are
 drawn from a salt only a human creates (:func:`init_salt`); the salt bytes
 never appear in an exception message, a public return value or a log. The
-real sealed datasets, the sealed caches and the sealed pools land in the
-next PR of this stack.
+real sealed datasets are read from ``<dataset>.sealed.json`` and tied to the
+public data by the prefix check, so a sealed file that does not extend the
+public one is refused. Sealed caches live outside the public cache root and
+hold forecasts cut at ``sealed.end + horizon``: nothing from the reserve
+segment ever enters one.
 """
 
 from __future__ import annotations
@@ -16,16 +19,41 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
+from evolvets.arena.dev import (
+    DevPool,
+    DevSeries,
+    checked_series,
+    checked_synthetic_series,
+    match_values,
+)
 from evolvets.arena.errors import ArenaError
+from evolvets.arena.realdata import REALDATA_VERSION
+from evolvets.arena.realdata.fetch import file_sha256
 from evolvets.arena.realdata.manifest import manifest_text, write_atomic
+from evolvets.arena.realdata.prepare import (
+    PrepareError,
+    SplitManifest,
+    load_public,
+    read_split_manifest,
+)
+from evolvets.arena.realdata.splits import Split
+from evolvets.arena.sealed.names import SEALED_DATASETS
 from evolvets.arena.synthetic import GENERATOR_VERSION
 from evolvets.arena.synthetic.grammar import FAMILIES, SyntheticTask, make_task
 from evolvets.arena.synthetic.seeds import world_seed
-from evolvets.cache.interfaces import SeriesInput
+from evolvets.cache.interfaces import CacheManifest, SeriesInput
+from evolvets.cache.store import (
+    DEFAULT_HORIZON,
+    CacheError,
+    build_cache,
+    cache_id,
+    read_manifest,
+)
 from evolvets.ledger.canonical import sha256_hex
 
 SALT_BYTES = 32
 SYNTHETIC_MANIFEST_VERSION = "1"
+_REAL_PERIOD = 24
 
 _HEX = set("0123456789abcdef")
 _MANIFEST_KEYS = (
@@ -147,14 +175,246 @@ def sealed_inputs(
 ) -> tuple[dict[str, str], tuple[SeriesInput, ...]]:
     """Return the ``(source, series)`` a sealed cache for ``dataset`` is built from.
 
-    ``synthetic-sealed`` derives its worlds from the salt; the real sealed
-    datasets join in the next PR of this stack. ``horizon`` is part of the
-    sealed-inputs interface and is used by the real datasets.
+    The real datasets read their sealed file and keep only
+    ``values[: sealed.end + horizon]``; ``synthetic-sealed`` derives its
+    worlds from the salt. Nothing from a reserve segment is returned.
     """
-    if dataset != "synthetic-sealed":
-        raise ArenaError(f"unknown dataset {dataset!r}; expected 'synthetic-sealed'")
-    source, series, _tasks, _spec = _synthetic_sealed_inputs(data_root, manifest_dir)
-    return source, series
+    if dataset in ("etth1", "ecl"):
+        source, series, _splits = _real_sealed(dataset, data_root, manifest_dir, horizon)
+        return source, series
+    if dataset == "synthetic-sealed":
+        source, series, _tasks, _spec = _synthetic_sealed_inputs(data_root, manifest_dir)
+        return source, series
+    raise ArenaError(f"unknown dataset {dataset!r}; expected one of {list(SEALED_DATASETS)}")
+
+
+def build_sealed_cache(
+    dataset: str,
+    data_root: Path,
+    manifest_dir: Path,
+    sealed_cache_root: Path,
+    horizon: int = DEFAULT_HORIZON,
+) -> CacheManifest:
+    """Build the sealed forecast cache for ``dataset`` under ``sealed_cache_root``.
+
+    This only adds the sealed guarantees to
+    :func:`evolvets.cache.store.build_cache` — which builds into a temporary
+    directory, never overwrites, and treats an equal rebuild as a no-op — and
+    refuses a cache root that could be the public one.
+    """
+    root = _checked_cache_root(sealed_cache_root)
+    if dataset not in SEALED_DATASETS:
+        raise ArenaError(f"unknown dataset {dataset!r}; expected one of {list(SEALED_DATASETS)}")
+    source, series = sealed_inputs(dataset, data_root, manifest_dir, horizon)
+    try:
+        return build_cache(dataset, source, series, root, horizon=horizon)
+    except CacheError as exc:
+        raise ArenaError(str(exc)) from exc
+
+
+def load_sealed_pool(
+    dataset: str, data_root: Path, manifest_dir: Path, sealed_cache_root: Path
+) -> DevPool:
+    """Load the sealed pool for ``dataset`` from its sealed cache and sealed data.
+
+    The pool is the dev replay's own type, so :func:`replay_dataset` and its
+    scoring run on sealed pools unchanged. Every failure — an unknown
+    dataset, a missing or tampered sealed cache, missing or tampered sealed
+    data — surfaces as :class:`ArenaError`.
+    """
+    if dataset not in SEALED_DATASETS:
+        raise ArenaError(f"unknown dataset {dataset!r}; expected one of {list(SEALED_DATASETS)}")
+    root = _checked_cache_root(sealed_cache_root)
+    try:
+        manifest = read_manifest(root, dataset)
+        ident = cache_id(root, dataset)
+    except CacheError as exc:
+        raise ArenaError(str(exc)) from exc
+    if dataset in ("etth1", "ecl"):
+        series = _real_pool_series(dataset, manifest, data_root, manifest_dir)
+    else:
+        series = _synthetic_pool_series(manifest, data_root, manifest_dir)
+    return DevPool(
+        dataset=dataset,
+        cache_root=root,
+        cache_id=ident,
+        manifest=manifest,
+        series=series,
+    )
+
+
+def _real_pool_series(
+    dataset: str, manifest: CacheManifest, data_root: Path, manifest_dir: Path
+) -> tuple[DevSeries, ...]:
+    """Build the real sealed series: sealed boundaries, no change points, no oracle."""
+    source, inputs, splits = _real_sealed(dataset, data_root, manifest_dir, manifest.horizon)
+    if len(inputs) != len(manifest.series):
+        raise ArenaError(
+            f"{manifest.dataset}: the cache holds {len(manifest.series)} series but the "
+            f"sealed data has {len(inputs)}"
+        )
+    out: list[DevSeries] = []
+    for entry, series_input, split in zip(manifest.series, inputs, splits, strict=True):
+        if series_input.series_id != entry.series_id:
+            raise ArenaError(
+                f"{manifest.dataset}: cache series {entry.series_id!r} does not match the "
+                f"sealed series {series_input.series_id!r} at the same position"
+            )
+        if entry.period != _REAL_PERIOD:
+            raise ArenaError(
+                f"{entry.series_id}: the cache records period {entry.period}, not {_REAL_PERIOD}"
+            )
+        match_values(entry, series_input.values)
+        warmup, _dev, sealed, _reserve = split.segments
+        out.append(
+            checked_series(
+                entry,
+                series_input.values,
+                manifest.horizon,
+                scale_end=warmup.end,
+                score_start=sealed.start,
+                score_end=sealed.end,
+                change_points=(),
+                oracle=None,
+            )
+        )
+    _check_source(manifest, source)
+    return tuple(out)
+
+
+def _synthetic_pool_series(
+    manifest: CacheManifest, data_root: Path, manifest_dir: Path
+) -> tuple[DevSeries, ...]:
+    """Build the synthetic sealed series: salted worlds, change points and the oracle."""
+    source, _series, tasks, _spec = _synthetic_sealed_inputs(data_root, manifest_dir)
+    series = checked_synthetic_series(manifest, tasks)
+    _check_source(manifest, source)
+    return series
+
+
+def _real_sealed(
+    dataset: str, data_root: Path, manifest_dir: Path, horizon: int
+) -> tuple[dict[str, str], tuple[SeriesInput, ...], tuple[Split, ...]]:
+    """Derive the real sealed source, series and splits from the sealed file."""
+    try:
+        spec = read_split_manifest(manifest_dir, dataset)
+        public = load_public(dataset, data_root, manifest_dir)
+    except PrepareError as exc:
+        raise ArenaError(str(exc)) from exc
+    sealed_file = Path(data_root) / "processed" / f"{dataset}.sealed.json"
+    values = _sealed_file_values(sealed_file, dataset, spec)
+    source = {
+        "kind": "realdata-sealed",
+        "dataset": dataset,
+        "realdata_version": spec.realdata_version,
+        "sealed_sha256": spec.sealed_sha256,
+        "public_sha256": spec.public_sha256,
+    }
+    series: list[SeriesInput] = []
+    splits: list[Split] = []
+    for (series_id, _start, split), loaded, full in zip(spec.series, public, values, strict=True):
+        _warmup, _dev, sealed, reserve = split.segments
+        if loaded.values != full[: sealed.start]:
+            raise ArenaError(
+                f"{sealed_file}: series {series_id!r} does not extend the public data: its "
+                f"first {sealed.start} values differ from the public file's"
+            )
+        if sealed.end + horizon > reserve.start:
+            raise ArenaError(
+                f"{series_id}: horizon {horizon} needs the target at index "
+                f"{sealed.end + horizon - 1}, inside the reserve segment from {reserve.start}"
+            )
+        series.append(SeriesInput(series_id, full[: sealed.end + horizon], _REAL_PERIOD))
+        splits.append(split)
+    return source, tuple(series), tuple(splits)
+
+
+def _sealed_file_values(
+    sealed_file: Path, dataset: str, spec: SplitManifest
+) -> tuple[tuple[float, ...], ...]:
+    """Read the sealed file with ``load_public``'s checks, at full length.
+
+    The file's SHA-256 must equal the split manifest's ``sealed_sha256``, the
+    keys, dataset, ``realdata_version``, series ids and starts must match the
+    manifest in order, every value must be a plain number, and each series'
+    length must equal its split's full length.
+    """
+    if not sealed_file.exists():
+        raise ArenaError(f"{sealed_file} is missing; run 'evolvets data prepare {dataset}'")
+    digest, _size = file_sha256(sealed_file)
+    if digest != spec.sealed_sha256:
+        raise ArenaError(
+            f"{sealed_file} does not match the split manifest: file sha256 {digest}, "
+            f"manifest sha256 {spec.sealed_sha256}"
+        )
+    try:
+        obj: object = json.loads(sealed_file.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise ArenaError(f"{sealed_file}: cannot be read: {exc}") from exc
+    if not isinstance(obj, dict):
+        raise ArenaError(f"{sealed_file}: must be a JSON object")
+    obj = {str(key): value for key, value in obj.items()}
+    if set(obj) != {"dataset", "realdata_version", "series"}:
+        raise ArenaError(f"{sealed_file}: keys must be exactly dataset, realdata_version, series")
+    if obj["dataset"] != dataset:
+        raise ArenaError(f"{sealed_file}: dataset must be {dataset!r}, got {obj['dataset']!r}")
+    if obj["realdata_version"] != REALDATA_VERSION:
+        raise ArenaError(
+            f"{sealed_file}: realdata_version must be {REALDATA_VERSION!r}, "
+            f"got {obj['realdata_version']!r}"
+        )
+    entries = obj["series"]
+    if not isinstance(entries, list) or len(entries) != len(spec.series):
+        raise ArenaError(
+            f"{sealed_file}: series count does not match the manifest's {len(spec.series)}"
+        )
+    out: list[tuple[float, ...]] = []
+    for index, (entry, (series_id, start, split)) in enumerate(
+        zip(entries, spec.series, strict=True)
+    ):
+        where = f"{sealed_file}: series[{index}]: "
+        if not isinstance(entry, dict):
+            raise ArenaError(f"{where}must be a JSON object")
+        entry = {str(key): value for key, value in entry.items()}
+        if set(entry) != {"series_id", "start", "values"}:
+            raise ArenaError(f"{where}keys must be exactly series_id, start, values")
+        if entry["series_id"] != series_id or entry["start"] != start:
+            raise ArenaError(
+                f"{where}must be {series_id!r} starting {start!r}, got "
+                f"{entry['series_id']!r} starting {entry['start']!r}"
+            )
+        raw_values = entry["values"]
+        if not isinstance(raw_values, list):
+            raise ArenaError(f"{where}values must be a list")
+        checked: list[float] = []
+        for value in raw_values:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ArenaError(f"{where}values must be numbers, got {value!r}")
+            checked.append(float(value))
+        if len(checked) != split.length:
+            raise ArenaError(f"{where}length {len(checked)} != the split's length {split.length}")
+        out.append(tuple(checked))
+    return tuple(out)
+
+
+def _checked_cache_root(sealed_cache_root: Path) -> Path:
+    """Return ``sealed_cache_root`` unless its last component names the public cache."""
+    root = Path(sealed_cache_root)
+    if root.name == "cache_store":
+        raise ArenaError(
+            f"{root}: this looks like the public cache root; the sealed cache must live in a "
+            "directory no public tool reads"
+        )
+    return root
+
+
+def _check_source(manifest: CacheManifest, source: dict[str, str]) -> None:
+    """Refuse a cache whose source does not match the one the sealed data recomputes."""
+    if manifest.source != source:
+        raise ArenaError(
+            f"{manifest.dataset}: the cache was built from {manifest.source}, but the sealed "
+            f"data now recomputes {source}"
+        )
 
 
 def _synthetic_sealed_inputs(

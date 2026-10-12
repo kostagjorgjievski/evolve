@@ -14,7 +14,7 @@ from typing import Literal
 
 from evolvets.arena import ARENA_VERSION
 from evolvets.arena.dev import DevPool, DevSeries
-from evolvets.arena.errors import ArenaError, UpdaterFailure
+from evolvets.arena.errors import UpdaterFailure
 from evolvets.arena.labels import LabelRelease
 from evolvets.arena.metrics import (
     SeriesScore,
@@ -23,8 +23,8 @@ from evolvets.arena.metrics import (
     origin_losses,
     recovery_times,
 )
+from evolvets.arena.pool import load_pool_forecasts, pool_expert_names, pool_leakage_risk
 from evolvets.arena.replay import SeriesTrace, replay_series
-from evolvets.cache.store import CacheError, load_series
 from evolvets.updater.interfaces import ConfigValue, Updater
 
 ResultStatus = Literal["ok", "failed", "invalid_weights"]  # the ledger's minus timeout
@@ -32,11 +32,21 @@ ResultStatus = Literal["ok", "failed", "invalid_weights"]  # the ledger's minus 
 
 @dataclass(frozen=True)
 class ReplayResult:
-    """The outcome of one updater replayed over one dev pool."""
+    """The outcome of one updater replayed over one dev pool.
+
+    ``pool_spec`` and ``foundation_cache_ids`` record which experts were
+    replayed and from which caches, so a run's records pin its pool; the
+    ledger's own ``metrics`` dicts stay float-only, which is why
+    ``leakage_risk`` rides on the result (and its blob) rather than inside
+    ``metrics``.
+    """
 
     dataset: str
     cache_id: str
     arena_version: str
+    pool_spec: str
+    foundation_cache_ids: tuple[str, ...]  # one per pooled foundation model, in pool order
+    leakage_risk: bool  # a pooled model may have seen this real dataset in pretraining
     status: ResultStatus
     error: str | None  # None iff ok
     failed_series: str | None
@@ -61,13 +71,11 @@ def replay_dataset(
     updater's fault. Nothing here charges a budget: the caller wraps it and
     charges every condition equally (AGENTS.md 2.5).
     """
+    names = pool_expert_names(pool)
     scores: list[SeriesScore] = []
     for series in pool.series:
         updater = updater_factory()
-        try:
-            forecasts = load_series(pool.cache_root, pool.manifest, series.series_id)
-        except CacheError as exc:
-            raise ArenaError(str(exc)) from exc
+        forecasts = load_pool_forecasts(pool, series.series_id)
         try:
             trace = replay_series(
                 updater,
@@ -79,12 +87,11 @@ def replay_dataset(
                 series.period,
                 pool.manifest.horizon,
                 series.score_end,
+                expert_names=names,
             )
         except UpdaterFailure as failure:
-            return ReplayResult(
-                dataset=pool.dataset,
-                cache_id=pool.cache_id,
-                arena_version=ARENA_VERSION,
+            return _result(
+                pool,
                 status=failure.kind,
                 error=failure.message,
                 failed_series=failure.series_id,
@@ -93,10 +100,8 @@ def replay_dataset(
                 series=(),
             )
         scores.append(_score_series(series, trace))
-    return ReplayResult(
-        dataset=pool.dataset,
-        cache_id=pool.cache_id,
-        arena_version=ARENA_VERSION,
+    return _result(
+        pool,
         status="ok",
         error=None,
         failed_series=None,
@@ -106,17 +111,49 @@ def replay_dataset(
     )
 
 
+def _result(
+    pool: DevPool,
+    *,
+    status: ResultStatus,
+    error: str | None,
+    failed_series: str | None,
+    failed_step: int | None,
+    metrics: dict[str, float],
+    series: tuple[SeriesScore, ...],
+) -> ReplayResult:
+    """Build one replay result, stamping the version, the pool and the leakage flag."""
+    return ReplayResult(
+        dataset=pool.dataset,
+        cache_id=pool.cache_id,
+        arena_version=ARENA_VERSION,
+        pool_spec=pool.pool_spec,
+        foundation_cache_ids=tuple(cache.cache_id for cache in pool.foundation),
+        leakage_risk=pool_leakage_risk(pool.dataset, pool.foundation),
+        status=status,
+        error=error,
+        failed_series=failed_series,
+        failed_step=failed_step,
+        metrics=metrics,
+        series=series,
+    )
+
+
 def result_to_obj(result: ReplayResult) -> dict[str, object]:
     """Return the JSON-ready object of ``result``; ``canonical_bytes`` accepts it.
 
     This is the planned content of an evaluation's ``per_task_blob``; its
     ``metrics`` is the planned ``metrics`` field of ``evaluation`` and
-    ``baseline`` records.
+    ``baseline`` records. ``pool_spec``, ``foundation_cache_ids`` and
+    ``leakage_risk`` are result-level: the ledger's metrics dicts hold floats
+    only, so the flag Gate 1 splits rows by cannot live inside them.
     """
     return {
         "dataset": result.dataset,
         "cache_id": result.cache_id,
         "arena_version": result.arena_version,
+        "pool_spec": result.pool_spec,
+        "foundation_cache_ids": list(result.foundation_cache_ids),
+        "leakage_risk": result.leakage_risk,
         "status": result.status,
         "error": result.error,
         "failed_series": result.failed_series,

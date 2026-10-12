@@ -12,20 +12,34 @@ docs/tasks/TASK_007_arena_replay.md, so traces are bit-identical everywhere.
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import cast
+from typing import Protocol, cast
 
 from evolvets.arena.errors import ArenaError, UpdaterFailure
 from evolvets.arena.labels import LabelRelease
-from evolvets.cache.store import SeriesForecasts
 from evolvets.experts.pool import EXPERT_NAMES
 from evolvets.updater.interfaces import ConfigValue, Context, Matured, Updater
 
 SEED_LIMIT = 2**63
 
-_N_EXPERTS = len(EXPERT_NAMES)
 _INF = float("inf")
 _NEG_INF = float("-inf")
 _SUM_TOLERANCE = 1e-9
+
+
+class Forecasts(Protocol):
+    """One cached series: every pooled expert's forecasts for every origin.
+
+    :class:`~evolvets.cache.store.SeriesForecasts` (the simple five) and
+    :class:`~evolvets.arena.pool.PoolForecasts` (the five plus foundation
+    point rows) both satisfy it, so the replay loop cannot tell a pool spec
+    from the forecasts object it was handed.
+    """
+
+    series_id: str
+    first_origin: int
+    last_origin: int
+
+    def at(self, origin: int) -> tuple[tuple[float, ...], ...]: ...  # [expert][h - 1]
 
 
 def _require_int(name: str, value: object, minimum: int) -> int:
@@ -35,6 +49,19 @@ def _require_int(name: str, value: object, minimum: int) -> int:
     if value < minimum:
         raise ArenaError(f"{name} must be >= {minimum}, got {value}")
     return value
+
+
+def _checked_expert_names(expert_names: Sequence[str]) -> tuple[str, ...]:
+    """Return ``expert_names`` as a non-empty tuple of unique strings, else raise."""
+    names = tuple(expert_names)
+    if not names:
+        raise ArenaError("expert_names must name at least one expert")
+    for name in names:
+        if not isinstance(name, str) or not name:
+            raise ArenaError(f"every expert name must be a non-empty str, got {name!r}")
+    if len(set(names)) != len(names):
+        raise ArenaError(f"expert_names must be unique, got {names}")
+    return names
 
 
 def _require_seed(seed: object) -> None:
@@ -76,7 +103,7 @@ def _is_finite(value: float) -> bool:
 
 
 def _validated_weights(
-    weights: object, horizon: int, series_id: str, step: int
+    weights: object, horizon: int, series_id: str, step: int, n_experts: int
 ) -> tuple[tuple[float, ...], ...]:
     """Type-check and copy what an updater returned, then validate the copy.
 
@@ -105,10 +132,10 @@ def _validated_weights(
         stored = tuple(rows)
     except Exception as exc:
         raise UpdaterFailure("invalid_weights", _failure_message(exc), series_id, step) from None
-    if len(stored) != _N_EXPERTS:
+    if len(stored) != n_experts:
         raise UpdaterFailure(
             "invalid_weights",
-            f"weights must have {_N_EXPERTS} rows, got {len(stored)}",
+            f"weights must have {n_experts} rows, got {len(stored)}",
             series_id,
             step,
         )
@@ -130,7 +157,7 @@ def _validated_weights(
                 )
     for h in range(horizon):
         total = 0.0
-        for e in range(_N_EXPERTS):
+        for e in range(n_experts):
             total = total + stored[e][h]
         if abs(total - 1.0) > _SUM_TOLERANCE:
             raise UpdaterFailure(
@@ -147,21 +174,26 @@ def replay_series(
     config: Mapping[str, ConfigValue],
     seed: int,
     series_id: str,
-    forecasts: SeriesForecasts,
+    forecasts: Forecasts,
     values: Sequence[float],
     period: int,
     horizon: int,
     end_origin: int,
+    expert_names: Sequence[str] = EXPERT_NAMES,
 ) -> SeriesTrace:
     """Replay one series: run the updater origin by origin and score its combinations.
 
-    Feedback for origin ``s`` arrives at exactly ``s + horizon``, once, as
-    :class:`~evolvets.updater.interfaces.Matured`; the last ``min(horizon,
-    end_origin - first_origin)`` origins are matured in a final drain with no
-    further ``update`` calls. Raises :class:`UpdaterFailure` if the updater
-    fails or returns invalid weights, :class:`ArenaError` for bad arguments.
+    ``expert_names`` names the pool the forecasts hold, in pool order; the
+    default is the simple five. Feedback for origin ``s`` arrives at exactly
+    ``s + horizon``, once, as :class:`~evolvets.updater.interfaces.Matured`;
+    the last ``min(horizon, end_origin - first_origin)`` origins are matured
+    in a final drain with no further ``update`` calls. Raises
+    :class:`UpdaterFailure` if the updater fails or returns invalid weights,
+    :class:`ArenaError` for bad arguments.
     """
     horizon = _require_int("horizon", horizon, 1)
+    names = _checked_expert_names(expert_names)
+    n_experts = len(names)
     for forecast_row in forecasts.at(forecasts.first_origin):
         if len(forecast_row) != horizon:
             raise ArenaError(
@@ -187,9 +219,7 @@ def replay_series(
     release = LabelRelease(values, horizon)
 
     try:
-        state: object = updater.init(
-            _N_EXPERTS, horizon, dict(config), series_seed(seed, series_id)
-        )
+        state: object = updater.init(n_experts, horizon, dict(config), series_seed(seed, series_id))
     except Exception as exc:
         raise UpdaterFailure("failed", _failure_message(exc), series_id, None) from None
 
@@ -205,7 +235,7 @@ def replay_series(
         errors.append(combined_errors)
         expert_errors = tuple(
             tuple(origin_forecasts[e][h] - targets[h] for h in range(horizon))
-            for e in range(_N_EXPERTS)
+            for e in range(n_experts)
         )
         return Matured(step=origin - t0, errors=expert_errors, combined_errors=combined_errors)
 
@@ -220,7 +250,7 @@ def replay_series(
             season_index=t % period,
             period=period,
             horizon=horizon,
-            expert_names=EXPERT_NAMES,
+            expert_names=names,
             forecasts=current,
         )
         try:
@@ -232,12 +262,12 @@ def replay_series(
         pair = cast("tuple[object, object]", result)
         if len(pair) != 2:
             raise UpdaterFailure("failed", "update must return (weights, state)", series_id, k)
-        stored = _validated_weights(pair[0], horizon, series_id, k)
+        stored = _validated_weights(pair[0], horizon, series_id, k, n_experts)
         state = pair[1]
         totals: list[float] = []
         for h in range(horizon):
             total = 0.0
-            for e in range(_N_EXPERTS):
+            for e in range(n_experts):
                 total = total + stored[e][h] * current[e][h]
             totals.append(total)
         combined.append(tuple(totals))

@@ -57,15 +57,15 @@ class Adapter(Protocol):
 ```python
 @dataclass(frozen=True)
 class ModelSpec:
-    name: str              # "chronos2", "tirex", "toto", "moirai2", "timesfm25"
-    hf_model_id: str       # verified from the model card, or "unknown" until PR C
-    hf_revision: str       # commit hash pinned in PR C; "unpinned" until then
+    name: str  # "chronos2", "tirex", "toto", "moirai2", "timesfm25"
+    hf_model_id: str  # verified from the model card, or "unknown" until PR C
+    hf_revision: str  # commit hash pinned in PR C; "unpinned" until then
     pip_package: str
     dependency_group: str  # "fm-chronos", ...
-    max_context: int       # L
-    license: str           # SPDX id or the license's name, as on the model card
+    max_context: int  # L
+    license: str  # SPDX id or the license's name, as on the model card
     pretraining_overlap: dict[str, str]  # dataset -> "yes" | "no" | "unknown", keys "etth1", "ecl"
-    overlap_source: str    # URL of the page the overlap entries were read from
+    overlap_source: str  # URL of the page the overlap entries were read from
 
 
 MODELS: dict[str, ModelSpec]  # in the order listed under "Models" above
@@ -77,13 +77,19 @@ def get_spec(name: str) -> ModelSpec: ...  # FoundationError for an unknown name
 `foundation/build.py`
 
 ```python
-def origin_contexts(values: Sequence[float], first: int, max_context: int) -> Iterator[tuple[int, tuple[float, ...]]]:
+def origin_contexts(
+    values: Sequence[float], first: int, max_context: int
+) -> Iterator[tuple[int, tuple[float, ...]]]:
     """Yield (t, values[max(0, t + 1 - max_context) : t + 1]) for t = first .. len(values) - 1."""
 
 
 def forecast_series(
-    adapter: Adapter, values: Sequence[float], first: int, max_context: int,
-    horizon: int, batch_size: int,
+    adapter: Adapter,
+    values: Sequence[float],
+    first: int,
+    max_context: int,
+    horizon: int,
+    batch_size: int,
 ) -> list[list[list[float]]]:
     """Forecasts for every origin, [origin][quantile][h], in origin order."""
 ```
@@ -129,14 +135,28 @@ The on-disk cache for one (dataset, model) pair: build, resume, verify, load, an
 `foundation/store.py`
 
 ```python
-def build_foundation_cache(dataset: str, adapter: Adapter, spec: ModelSpec, root: Path,
-                           cache_root: Path, data_root: Path, manifest_dir: Path,
-                           batch_size: int, per_family: int | None = None) -> FoundationManifest: ...
+def build_foundation_cache(
+    dataset: str,
+    adapter: Adapter,
+    spec: ModelSpec,
+    root: Path,
+    cache_root: Path,
+    data_root: Path,
+    manifest_dir: Path,
+    batch_size: int,
+    per_family: int | None = None,
+) -> FoundationManifest: ...
 def read_foundation_manifest(root: Path, dataset: str, model: str) -> FoundationManifest: ...
-def foundation_cache_id(root: Path, dataset: str, model: str) -> str: ...  # sha256 of manifest bytes
+def foundation_cache_id(
+    root: Path, dataset: str, model: str
+) -> str: ...  # sha256 of manifest bytes
 def verify_foundation_cache(root: Path, dataset: str, model: str) -> FoundationManifest: ...
-def load_foundation_series(root: Path, manifest: FoundationManifest, series_id: str) -> FoundationSeries: ...
-def compare_rebuild(root: Path, dataset: str, model: str, adapter: Adapter, sample: int, seed: int) -> RebuildReport: ...
+def load_foundation_series(
+    root: Path, manifest: FoundationManifest, series_id: str
+) -> FoundationSeries: ...
+def compare_rebuild(
+    root: Path, dataset: str, model: str, adapter: Adapter, sample: int, seed: int
+) -> RebuildReport: ...
 ```
 
 `FoundationManifest` and `FoundationSeries` are frozen dataclasses in `foundation/interfaces.py`. `FoundationSeries.point(origin_index)` returns the 0.5-quantile row.

@@ -136,3 +136,31 @@ class FoundationSeries:
                 f"for series {self.series_id!r}"
             )
         return (origin_index * len(QUANTILES) + quantile) * self.horizon
+
+
+@dataclass(frozen=True)
+class RebuildReport:
+    """What :func:`evolvets.foundation.store.compare_rebuild` found on one cache.
+
+    GPU forecasts are not bit-reproducible, so a recompute is expected to
+    differ slightly from the stored bytes; the report quantifies that drift
+    over the sampled origins. It is a diagnostic: it never edits the cache,
+    and it says nothing about integrity — file bytes are verified against the
+    manifest by :func:`evolvets.foundation.store.verify_foundation_cache`.
+    A compared value that is not finite is the worst kind of drift and never
+    reads as a match: it is counted in ``n_nonfinite`` and drives both maxima
+    to ``inf``.
+    """
+
+    dataset: str
+    model: str
+    seed: int
+    n_compared: int  # origins recomputed
+    n_total: int  # every (series, origin) pair the cache holds
+    n_nonfinite: int  # compared values (stored or recomputed) that were NaN or ±inf
+    # max |recomputed - stored| over the 0.5-quantile rows, and that diff divided by
+    # max(|stored|, 1e-12). The 1e-12 floor makes a stored 0.0 against any nonzero
+    # recompute an enormous relative diff, which a diagnostic wants. Both fields are
+    # inf whenever a compared value (stored or recomputed) is NaN or ±inf.
+    max_abs_diff: float
+    max_rel_diff: float

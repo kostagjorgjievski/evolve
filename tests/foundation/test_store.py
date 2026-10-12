@@ -8,14 +8,17 @@ pins the exact bytes a fixed fake build produces, with ``build_seconds`` and
 manifest field changed (bump ``FOUNDATION_CACHE_VERSION``) or the fake
 adapter's forecasts changed.
 
-TASK_009 PR B tests 1-8; the CLI and ``compare_rebuild`` (tests 9-10) arrive
-with ``feat/foundation-cache-cli``.
+TASK_009 PR B tests 1-8; tests 9 (``compare_rebuild``) and 10 (the CLI, in
+``test_cli.py``) arrived with ``feat/foundation-cache-cli``.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
+import math
+import shutil
+import struct
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,9 +35,10 @@ from evolvets.foundation import FOUNDATION_CACHE_VERSION
 from evolvets.foundation.build import forecast_series
 from evolvets.foundation.errors import FoundationError
 from evolvets.foundation.fake import FAKE_SPEC, FakeAdapter
-from evolvets.foundation.interfaces import QUANTILES, FoundationManifest
+from evolvets.foundation.interfaces import QUANTILES, FoundationManifest, RebuildReport
 from evolvets.foundation.store import (
     build_foundation_cache,
+    compare_rebuild,
     foundation_cache_id,
     load_foundation_series,
     read_foundation_manifest,
@@ -463,3 +467,136 @@ def test_synthetic_dev_build_with_per_family(tmp_path: Path) -> None:
     loaded = load_foundation_series(root, manifest, manifest.series[0].series_id)
     assert loaded.n_origins == _SYNTHETIC_ROWS - _START
     assert len(loaded.point(0)) == _HORIZON
+
+
+# --- Test 9: compare_rebuild -------------------------------------------------------------
+
+
+def _compare(
+    env: SimpleNamespace,
+    root: Path | None = None,
+    sample: int = _N_SERIES * _N_ORIGINS,
+    seed: int = 0,
+    adapter: FakeAdapter | None = None,
+    data_root: Path | None = None,
+    manifest_dir: Path | None = None,
+) -> RebuildReport:
+    """Compare the fixture cache (a copy under ``root``) with the fake adapter."""
+    return compare_rebuild(
+        env.root if root is None else root,
+        "etth1",
+        "fake",
+        FakeAdapter() if adapter is None else adapter,
+        sample,
+        seed,
+        data_root=env.data_root if data_root is None else data_root,
+        manifest_dir=env.manifest_dir if manifest_dir is None else manifest_dir,
+    )
+
+
+def _tree_digest(root: Path) -> dict[Path, str]:
+    """Hash every file under ``root`` (by relative path), to prove a run was read-only."""
+    return {
+        path.relative_to(root): sha256_hex(path.read_bytes())
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_compare_rebuild_reports_zero_difference_on_the_whole_cache(env: SimpleNamespace) -> None:
+    """A full-sample compare of an intact fake cache reports zeros and edits nothing."""
+    _build(env)
+    before = _tree_digest(env.root)
+    report = _compare(env)
+    assert (report.dataset, report.model, report.seed) == ("etth1", "fake", 0)
+    assert report.n_compared == report.n_total == _N_SERIES * _N_ORIGINS
+    assert report.n_nonfinite == 0
+    assert report.max_abs_diff == 0.0
+    assert report.max_rel_diff == 0.0
+    assert _tree_digest(env.root) == before  # the diagnostic never edits the cache
+
+
+def test_compare_rebuild_draws_a_seeded_sample(env: SimpleNamespace) -> None:
+    """The same seed redraws the same origins; a deterministic adapter matches them all."""
+    _build(env)
+    first = _compare(env, sample=10, seed=7)
+    second = _compare(env, sample=10, seed=7)
+    assert first == second
+    assert first.n_compared == 10 < first.n_total
+    assert first.max_abs_diff == 0.0
+    assert first.max_rel_diff == 0.0
+
+
+def test_compare_rebuild_reports_a_nonzero_difference_after_a_changed_value(
+    env: SimpleNamespace, tmp_path: Path
+) -> None:
+    """One changed stored 0.5 value shows up as a nonzero difference, without any hash gate."""
+    _build(env)
+    other_root = tmp_path / "other_foundation"
+    shutil.copytree(env.root / "etth1", other_root / "etth1")
+    path = other_root / "etth1" / "fake" / "series" / "0000.f64"
+    raw = bytearray(path.read_bytes())
+    offset = (_POINT * _HORIZON) * 8  # origin 0, point quantile (0.5), step 1
+    stored = struct.unpack_from("<d", raw, offset)[0]
+    struct.pack_into("<d", raw, offset, stored + 1.0)
+    path.write_bytes(bytes(raw))
+    before = _tree_digest(other_root)
+
+    report = _compare(env, root=other_root)
+    assert report.max_abs_diff == pytest.approx(1.0)
+    assert report.max_rel_diff > 0.0
+    assert report.n_nonfinite == 0
+    assert _tree_digest(other_root) == before
+    with pytest.raises(FoundationError, match="sha256"):  # integrity stays verify's job
+        verify_foundation_cache(other_root, "etth1", "fake")
+
+
+def test_compare_rebuild_reports_nonfinite_stored_values_as_inf_drift(
+    env: SimpleNamespace, tmp_path: Path
+) -> None:
+    """A NaN or ±inf stored 0.5 value reads as inf drift on both maxima, never as zero."""
+    _build(env)
+    for label, bad in (
+        ("nan", float("nan")),
+        ("inf", float("inf")),
+        ("neginf", float("-inf")),
+    ):
+        other_root = tmp_path / f"nonfinite_{label}"
+        shutil.copytree(env.root / "etth1", other_root / "etth1")
+        path = other_root / "etth1" / "fake" / "series" / "0000.f64"
+        raw = bytearray(path.read_bytes())
+        struct.pack_into("<d", raw, _POINT * _HORIZON * 8, bad)  # origin 0, 0.5, step 1
+        path.write_bytes(bytes(raw))
+        before = _tree_digest(other_root)
+
+        report = _compare(env, root=other_root)
+        assert report.n_nonfinite == 1
+        assert report.max_abs_diff == math.inf  # not NaN-vanished, and not zero drift
+        assert report.max_rel_diff == math.inf
+        assert _tree_digest(other_root) == before
+
+
+def test_compare_rebuild_refuses_inputs_the_cache_was_not_built_from(
+    env: SimpleNamespace, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Public inputs that no longer match the manifest are refused before recomputing."""
+    _build(env)
+    # a valid but shorter split: 512 rows still split (the minimum is 509) with a shorter
+    # public segment than the 344 the cache was built from
+    etth1 = _build_etth1_fixture(tmp_path / "fixtures2", rows=512)
+    _install(monkeypatch, etth1=etth1)
+    data_root, manifest_dir = tmp_path / "data2", tmp_path / "manifests2"
+    fetch(etth1, data_root, manifest_dir, today=date(2026, 10, 11))
+    prepare("etth1", data_root, manifest_dir)
+    with pytest.raises(FoundationError, match="no longer match"):
+        _compare(env, sample=5, data_root=data_root, manifest_dir=manifest_dir)
+
+
+def test_compare_rebuild_validates_its_arguments(env: SimpleNamespace) -> None:
+    """Bad sample/seed values and a mismatched adapter name each raise FoundationError."""
+    _build(env)
+    for sample, seed in ((0, 0), (True, 0), (3, -1), (3, True)):
+        with pytest.raises(FoundationError, match="must be"):
+            _compare(env, sample=sample, seed=seed)
+    with pytest.raises(FoundationError, match="does not match the cached model"):
+        _compare(env, sample=3, adapter=FakeAdapter("nope"))

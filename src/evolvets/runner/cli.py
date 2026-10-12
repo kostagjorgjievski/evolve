@@ -31,10 +31,21 @@ from evolvets.cache.store import (
     cache_id,
     verify_cache,
 )
+from evolvets.foundation.errors import FoundationError
+from evolvets.foundation.fake import FAKE_SPEC, FakeAdapter
+from evolvets.foundation.registry import MODELS, ModelSpec
+from evolvets.foundation.store import (
+    build_foundation_cache,
+    compare_rebuild,
+    foundation_cache_id,
+    verify_foundation_cache,
+)
 from evolvets.ledger.store import LedgerLockedError, LedgerReader, LedgerWriter
 from evolvets.ledger.validate import validate_run
 
 _DATASET_ORDER = ("etth1", "ecl")
+#: ``--model`` choices: the test/CI fake, then the registry's model order.
+_FOUNDATION_MODELS = ("fake", *MODELS)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -98,6 +109,91 @@ def build_parser() -> argparse.ArgumentParser:
                 type=int,
                 help="synthetic tasks per family; required for synthetic-dev (and 'all')",
             )
+
+    foundation = subparsers.add_parser(
+        "foundation", help="foundation-model forecast cache build and verification"
+    )
+    foundation_sub = foundation.add_subparsers(
+        dest="foundation_command", metavar="FOUNDATION-COMMAND"
+    )
+    foundation_build = foundation_sub.add_parser(
+        "build", help="compute one model's forecasts and install them as a cache"
+    )
+    foundation_build.add_argument(
+        "--dataset",
+        choices=CACHE_DATASETS,
+        required=True,
+        help="which dataset (one model per build)",
+    )
+    foundation_build.add_argument(
+        "--model",
+        choices=_FOUNDATION_MODELS,
+        required=True,
+        help="which model ('fake' for tests and CI; the pretrained models arrive in TASK_009 PR C)",
+    )
+    foundation_build.add_argument(
+        "--root", default="foundation_cache", help="foundation cache root directory"
+    )
+    foundation_build.add_argument(
+        "--cache-root", default="cache_store", help="simple cache root directory"
+    )
+    foundation_build.add_argument("--data-root", default="data", help="data root directory")
+    foundation_build.add_argument(
+        "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+    )
+    foundation_build.add_argument(
+        "--batch-size", type=int, default=32, help="contexts per adapter call (default: 32)"
+    )
+    foundation_build.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="adapter device; auto uses CUDA when available (real models arrive in TASK_009 PR C)",
+    )
+    foundation_build.add_argument(
+        "--per-family", type=int, help="synthetic tasks per family; required for synthetic-dev"
+    )
+    foundation_verify = foundation_sub.add_parser(
+        "verify", help="check an existing cache against its manifest"
+    )
+    foundation_verify.add_argument(
+        "--dataset", choices=CACHE_DATASETS, required=True, help="which dataset"
+    )
+    foundation_verify.add_argument(
+        "--model",
+        choices=_FOUNDATION_MODELS,
+        required=True,
+        help="which model ('fake' for tests and CI; the pretrained models arrive in TASK_009 PR C)",
+    )
+    foundation_verify.add_argument(
+        "--root", default="foundation_cache", help="foundation cache root directory"
+    )
+    foundation_compare = foundation_sub.add_parser(
+        "compare",
+        help="recompute a seeded sample of origins and report the drift (diagnostic, read-only)",
+    )
+    foundation_compare.add_argument(
+        "--dataset", choices=CACHE_DATASETS, required=True, help="which dataset"
+    )
+    foundation_compare.add_argument(
+        "--model",
+        choices=_FOUNDATION_MODELS,
+        required=True,
+        help="which model ('fake' for tests and CI; the pretrained models arrive in TASK_009 PR C)",
+    )
+    foundation_compare.add_argument(
+        "--root", default="foundation_cache", help="foundation cache root directory"
+    )
+    foundation_compare.add_argument("--data-root", default="data", help="data root directory")
+    foundation_compare.add_argument(
+        "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+    )
+    foundation_compare.add_argument(
+        "--sample", type=int, required=True, help="how many origins to recompute"
+    )
+    foundation_compare.add_argument(
+        "--seed", type=int, required=True, help="seed for the origin sample"
+    )
 
     sealed = subparsers.add_parser(
         "sealed", help="sealed salt creation and sealed cache build (trusted, human-started)"
@@ -247,6 +343,106 @@ def _cmd_cache(
     return 1 if failed else 0
 
 
+def _require_fake_model(model: str) -> None:
+    """Refuse a real model name: its adapter arrives with TASK_009 PR C."""
+    if model != "fake":
+        raise FoundationError(
+            f"model {model!r} arrives with TASK_009 PR C (feat/foundation-models); "
+            "only --model fake can run today"
+        )
+
+
+def _foundation_adapter(model: str, device: str) -> tuple[FakeAdapter, ModelSpec]:
+    """Resolve ``--model`` to an adapter and its spec; today only the fake exists."""
+    _require_fake_model(model)
+    if device == "cuda":
+        raise FoundationError(
+            "--device cuda needs a real model (TASK_009 PR C); the fake adapter runs on cpu"
+        )
+    return FakeAdapter(), FAKE_SPEC
+
+
+def _cmd_foundation_build(
+    dataset: str,
+    model: str,
+    root: str,
+    cache_root: str,
+    data_root: str,
+    manifest_dir: str,
+    batch_size: int,
+    device: str,
+    per_family: int | None,
+) -> int:
+    """Build one (dataset, model) foundation cache; one FAIL line on any refusal."""
+    try:
+        adapter, spec = _foundation_adapter(model, device)
+        manifest = build_foundation_cache(
+            dataset,
+            adapter,
+            spec,
+            Path(root),
+            Path(cache_root),
+            Path(data_root),
+            Path(manifest_dir),
+            batch_size,
+            per_family=per_family,
+        )
+        ident = foundation_cache_id(Path(root), dataset, model)
+    except (FoundationError, CacheError, PrepareError, ValueError, OSError) as exc:
+        print(f"FAIL {dataset}/{model}: {exc}")
+        return 1
+    origins = sum(entry.n_origins for entry in manifest.series)
+    print(f"OK {dataset}/{model}: {len(manifest.series)} series, {origins} origins, cache {ident}")
+    return 0
+
+
+def _cmd_foundation_verify(dataset: str, model: str, root: str) -> int:
+    """Verify one (dataset, model) cache against its manifest; FAIL names the fault."""
+    try:
+        _require_fake_model(model)
+        manifest = verify_foundation_cache(Path(root), dataset, model)
+        ident = foundation_cache_id(Path(root), dataset, model)
+    except (FoundationError, CacheError, ValueError, OSError) as exc:
+        print(f"FAIL {dataset}/{model}: {exc}")
+        return 1
+    origins = sum(entry.n_origins for entry in manifest.series)
+    print(f"OK {dataset}/{model}: {len(manifest.series)} series, {origins} origins, cache {ident}")
+    return 0
+
+
+def _cmd_foundation_compare(
+    dataset: str,
+    model: str,
+    root: str,
+    data_root: str,
+    manifest_dir: str,
+    sample: int,
+    seed: int,
+) -> int:
+    """Recompute a sample of origins and report the drift; a diagnostic, so 0 unless it fails."""
+    try:
+        adapter, _spec = _foundation_adapter(model, "auto")
+        report = compare_rebuild(
+            Path(root),
+            dataset,
+            model,
+            adapter,
+            sample,
+            seed,
+            data_root=Path(data_root),
+            manifest_dir=Path(manifest_dir),
+        )
+    except (FoundationError, CacheError, PrepareError, ValueError, OSError) as exc:
+        print(f"FAIL {dataset}/{model}: {exc}")
+        return 1
+    print(
+        f"OK {dataset}/{model}: compared {report.n_compared}/{report.n_total} origins, "
+        f"max_abs {report.max_abs_diff:.3e}, max_rel {report.max_rel_diff:.3e}, "
+        f"{report.n_nonfinite} non-finite values"
+    )
+    return 0
+
+
 def _cmd_sealed_init(per_family: int, data_root: str, manifest_dir: str) -> int:
     """Create (or confirm) the sealed salt; print its hash, never the salt itself."""
     try:
@@ -307,6 +503,33 @@ def main(argv: list[str] | None = None) -> int:
         if args.cache_command == "verify":
             return _cmd_cache(
                 "verify", args.dataset, args.cache_root, args.data_root, args.manifest_dir
+            )
+        parser.print_help()
+        return 0
+    if args.command == "foundation":
+        if args.foundation_command == "build":
+            return _cmd_foundation_build(
+                args.dataset,
+                args.model,
+                args.root,
+                args.cache_root,
+                args.data_root,
+                args.manifest_dir,
+                args.batch_size,
+                args.device,
+                args.per_family,
+            )
+        if args.foundation_command == "verify":
+            return _cmd_foundation_verify(args.dataset, args.model, args.root)
+        if args.foundation_command == "compare":
+            return _cmd_foundation_compare(
+                args.dataset,
+                args.model,
+                args.root,
+                args.data_root,
+                args.manifest_dir,
+                args.sample,
+                args.seed,
             )
         parser.print_help()
         return 0

@@ -50,10 +50,11 @@ class FakeAdapter:
         return out
 
 
-#: The spec ``--model fake`` builds with (TASK_009 PR B: the CLI arrives with
-#: ``feat/foundation-cache-cli``). No Hugging Face id, package or license
-#: applies — the fake is generated code, not a pretrained model, so it saw
-#: nothing in pretraining — and its context window is 512 values.
+#: The spec ``--model fake`` builds with (``evolvets foundation build``, for
+#: tests and CI only). No Hugging Face id, package or license applies — the
+#: fake is generated code, not a pretrained model, so it saw nothing in
+#: pretraining — and its context window is 512 values. Real models arrive
+#: with TASK_009 PR C, which replaces the registry's placeholder entries.
 FAKE_SPEC = ModelSpec(
     name="fake",
     hf_model_id="none",

@@ -28,6 +28,14 @@ fm-chronos = [
     # machine under torch 2.6 — and the adapters must also run on CPU.
     "transformers>=4.41,<5",
 ]
+# TASK_009 PR C2: tirex-ts leaves torch unpinned (its base install has no
+# torch bound), so the pinned torch resolves cleanly; the xlstm CUDA kernels
+# live only in its extras and are not installed — the pure-torch backend runs
+# on CPU and GPU alike.
+fm-tirex = [
+    "tirex-ts>=1.4,<2",
+    "torch==2.6.*",
+]
 
 [build-system]
 requires = ["hatchling"]

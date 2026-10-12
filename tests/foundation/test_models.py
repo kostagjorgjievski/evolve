@@ -1,10 +1,10 @@
-"""Model-adapter tests for TASK_009 PR C1: load_adapter, the chronos2 pin, smoke.
+"""Model-adapter tests for TASK_009 PR C1/C2: load_adapter, the model pins, smoke.
 
-Test 2 needs the real library and model weights: it carries the ``foundation``
-marker, skips without the library (``importorskip``) and runs in the GPU
-workflow, not in plain CI. The missing-library tests assert a behaviour that
-only exists without the library, so they skip when it is installed. Everything
-else runs torch-free in plain CI.
+The real-model tests need the library and model weights: they carry the
+``foundation`` marker, skip without the library (``importorskip``) and run in
+the GPU workflow, not in plain CI. The missing-library tests assert a
+behaviour that only exists without the library, so they skip when it is
+installed. Everything else runs torch-free in plain CI.
 """
 
 from __future__ import annotations
@@ -33,6 +33,11 @@ _needs_library_absent = pytest.mark.skipif(
     importlib.util.find_spec("chronos") is not None,
     reason="behaviour under test needs chronos absent (fm-chronos installs it)",
 )
+#: The same for tirex; the fm-tirex group installs the library.
+_needs_tirex_absent = pytest.mark.skipif(
+    importlib.util.find_spec("tirex") is not None,
+    reason="behaviour under test needs tirex absent (fm-tirex installs it)",
+)
 
 
 # --- C1 test 1: the chronos2 registry entry is verified and pinned -----------------------
@@ -51,11 +56,82 @@ def test_chronos2_entry_is_pinned() -> None:
 
 
 def test_other_models_remain_unpinned_placeholders() -> None:
-    """C1 fills in chronos2 only; the other four arrive with their own PRs (C2 to C5)."""
-    for name in ("tirex", "toto", "moirai2", "timesfm25"):
+    """C1 and C2 fill in chronos2 and tirex; the rest arrive with their own PRs (C3 to C5)."""
+    for name in ("toto", "moirai2", "timesfm25"):
         spec = get_spec(name)
         assert spec.hf_revision == "unpinned"
         assert spec.quantile_method == "unknown"
+
+
+# --- C2 test 1: the tirex registry entry is verified and pinned ---------------------------
+
+
+def test_tirex_entry_is_pinned() -> None:
+    """hf_revision is a 40-hex commit hash; max_context, license and overlap_source are set."""
+    spec = get_spec("tirex")
+    assert spec.hf_model_id == "NX-AI/TiRex"
+    assert re.fullmatch(r"[0-9a-f]{40}", spec.hf_revision)
+    assert spec.hf_revision != "unpinned"
+    assert spec.max_context == 2048  # the library FAQ's maximum, under the task's 4096 cap
+    assert spec.quantile_method == "native"
+    assert spec.license  # "nx-ai-community-license", read from the model card
+    assert spec.overlap_source.startswith(("http://", "https://"))
+
+
+# --- C2 test 2: the real smoke check (library and weights; GPU workflow) -----------------
+
+
+@pytest.mark.foundation
+def test_tirex_smoke_passes_on_cpu() -> None:
+    """The smoke check passes with the real adapter on CPU, a context of 128.
+
+    C1's chronos2 test uses a context of 64; TiRex's released model (patch
+    size 32) cannot carry the smoke series' 0.15/step trend from only two
+    patches of in-context signal — it tracks the sine's phase but damps the
+    trend (measured 2026-10-12: MAE 1.87 vs naive 1.26 at 64; 0.23 at 128 and
+    0.24 at the registry context). 128 is four patches, still a short context,
+    and every run_smoke check (shapes, finiteness, batch invariance, MAE beats
+    naive) runs unchanged.
+    """
+    pytest.importorskip("tirex")
+    adapter = load_adapter("tirex", "cpu")
+    spec = dataclasses.replace(get_spec("tirex"), max_context=128)
+    report = run_smoke(spec, adapter)
+    assert report.ok, report.problems
+    assert report.device == "cpu"
+    assert report.n_origins == 20
+    assert report.max_rel_batch_diff <= 1e-3
+
+
+# --- C2 test 3: build names the missing dependency group (plain CI) ----------------------
+
+
+@_needs_tirex_absent
+def test_build_without_tirex_library_names_the_group(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """build --model tirex with the library absent exits nonzero naming fm-tirex."""
+    argv = [
+        "foundation",
+        "build",
+        "--dataset",
+        "etth1",
+        "--model",
+        "tirex",
+        "--root",
+        str(tmp_path / "foundation_cache"),
+        "--cache-root",
+        str(tmp_path / "cache_store"),
+        "--data-root",
+        str(tmp_path / "data"),
+        "--manifest-dir",
+        str(tmp_path / "manifests"),
+    ]
+    assert cli.main(argv) == 1
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 1 and out[0].startswith("FAIL etth1/tirex: ")
+    assert "fm-tirex" in out[0]
+    assert not (tmp_path / "foundation_cache").exists()
 
 
 # --- C1 test 2: the real smoke check (library and weights; GPU workflow) -----------------
@@ -109,10 +185,11 @@ def test_build_without_library_names_the_group(
 
 
 def test_import_models_without_torch() -> None:
-    """import evolvets.foundation.models and .chronos2 succeed with torch absent."""
+    """import evolvets.foundation.models and its adapter modules succeed with torch absent."""
     code = (
         "import sys; "
-        "import evolvets.foundation.models, evolvets.foundation.models.chronos2; "
+        "import evolvets.foundation.models, evolvets.foundation.models.chronos2, "
+        "evolvets.foundation.models.tirex; "
         "assert 'torch' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True)
@@ -130,7 +207,7 @@ def test_load_adapter_unknown_name() -> None:
 def test_load_adapter_module_not_yet_added() -> None:
     """A registered model whose adapter module is absent says which PR brings it."""
     with pytest.raises(FoundationError, match="arrives with TASK_009 PR C"):
-        load_adapter("tirex", "cpu")
+        load_adapter("toto", "cpu")
 
 
 @_needs_library_absent

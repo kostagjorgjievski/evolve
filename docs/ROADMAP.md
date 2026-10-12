@@ -37,7 +37,7 @@ Parallel track (PR 8 has landed; entry 12 approved by the owner on 2026-10-12):
 
 | # | Branch | Content |
 |---|---|---|
-| 12 | `feat/foundation-experts` | Chronos-2, TiRex, Moirai 2.0, TimesFM 2.5 as cached experts, built on the lab GPU (approved; TASK_009). Toto dropped: needs torch 2.7 or Python 3.12 (issue #64); revisit if the project moves to Python 3.12 |
+| 12 | `feat/foundation-experts` | Chronos-2, TiRex, TimesFM 2.5 as cached experts, built on the lab GPU (approved; TASK_009). Toto dropped: needs torch 2.7 or Python 3.12 (issue #64). Moirai 2.0 dropped: uni2ts needs torch<2.5 and the license is non-commercial (issue #66). Revisit if the project's torch/Python pins change |
 | 13 | `feat/live-commit` | Daily public, timestamped forecast commitments from generation 0 onward |
 
 ## Phase 1: the loop with an API LLM (questions 2 and 3)

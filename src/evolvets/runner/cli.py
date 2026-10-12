@@ -128,6 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
     foundation_build.add_argument(
         "--model",
         choices=_FOUNDATION_MODELS,
+        required=True,
         help="which model ('fake' for tests and CI; the pretrained models arrive in TASK_009 PR C)",
     )
     foundation_build.add_argument(
@@ -161,6 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     foundation_verify.add_argument(
         "--model",
         choices=_FOUNDATION_MODELS,
+        required=True,
         help="which model ('fake' for tests and CI; the pretrained models arrive in TASK_009 PR C)",
     )
     foundation_verify.add_argument(
@@ -176,6 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
     foundation_compare.add_argument(
         "--model",
         choices=_FOUNDATION_MODELS,
+        required=True,
         help="which model ('fake' for tests and CI; the pretrained models arrive in TASK_009 PR C)",
     )
     foundation_compare.add_argument(
@@ -434,7 +437,8 @@ def _cmd_foundation_compare(
         return 1
     print(
         f"OK {dataset}/{model}: compared {report.n_compared}/{report.n_total} origins, "
-        f"max_abs {report.max_abs_diff:.3e}, max_rel {report.max_rel_diff:.3e}"
+        f"max_abs {report.max_abs_diff:.3e}, max_rel {report.max_rel_diff:.3e}, "
+        f"{report.n_nonfinite} non-finite values"
     )
     return 0
 

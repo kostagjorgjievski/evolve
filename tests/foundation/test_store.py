@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import shutil
 import struct
 from datetime import date
@@ -509,6 +510,7 @@ def test_compare_rebuild_reports_zero_difference_on_the_whole_cache(env: SimpleN
     report = _compare(env)
     assert (report.dataset, report.model, report.seed) == ("etth1", "fake", 0)
     assert report.n_compared == report.n_total == _N_SERIES * _N_ORIGINS
+    assert report.n_nonfinite == 0
     assert report.max_abs_diff == 0.0
     assert report.max_rel_diff == 0.0
     assert _tree_digest(env.root) == before  # the diagnostic never edits the cache
@@ -543,9 +545,35 @@ def test_compare_rebuild_reports_a_nonzero_difference_after_a_changed_value(
     report = _compare(env, root=other_root)
     assert report.max_abs_diff == pytest.approx(1.0)
     assert report.max_rel_diff > 0.0
+    assert report.n_nonfinite == 0
     assert _tree_digest(other_root) == before
     with pytest.raises(FoundationError, match="sha256"):  # integrity stays verify's job
         verify_foundation_cache(other_root, "etth1", "fake")
+
+
+def test_compare_rebuild_reports_nonfinite_stored_values_as_inf_drift(
+    env: SimpleNamespace, tmp_path: Path
+) -> None:
+    """A NaN or ±inf stored 0.5 value reads as inf drift on both maxima, never as zero."""
+    _build(env)
+    for label, bad in (
+        ("nan", float("nan")),
+        ("inf", float("inf")),
+        ("neginf", float("-inf")),
+    ):
+        other_root = tmp_path / f"nonfinite_{label}"
+        shutil.copytree(env.root / "etth1", other_root / "etth1")
+        path = other_root / "etth1" / "fake" / "series" / "0000.f64"
+        raw = bytearray(path.read_bytes())
+        struct.pack_into("<d", raw, _POINT * _HORIZON * 8, bad)  # origin 0, 0.5, step 1
+        path.write_bytes(bytes(raw))
+        before = _tree_digest(other_root)
+
+        report = _compare(env, root=other_root)
+        assert report.n_nonfinite == 1
+        assert report.max_abs_diff == math.inf  # not NaN-vanished, and not zero drift
+        assert report.max_rel_diff == math.inf
+        assert _tree_digest(other_root) == before
 
 
 def test_compare_rebuild_refuses_inputs_the_cache_was_not_built_from(

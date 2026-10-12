@@ -8,6 +8,7 @@ their adapters arrive in PR C, and every command runs end to end with
 from __future__ import annotations
 
 import re
+import struct
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,13 +18,15 @@ import pytest
 from evolvets.arena.realdata.fetch import fetch
 from evolvets.arena.realdata.prepare import prepare
 from evolvets.cache.datasets import public_inputs
-from evolvets.cache.store import build_cache
+from evolvets.cache.store import DEFAULT_HORIZON, build_cache
+from evolvets.foundation.interfaces import QUANTILES
 from evolvets.foundation.store import foundation_cache_id, read_foundation_manifest
 from evolvets.runner import cli
 from tests.arena.test_realdata_prepare import _build_etth1_fixture, _install
 
 _PUBLIC_ROWS = 344
 _START = 287  # first_origin(24)
+_POINT = QUANTILES.index(0.5)  # 4
 _N_SERIES = 7
 _ORIGINS = _N_SERIES * (_PUBLIC_ROWS - _START)  # 399
 _SYNTHETIC_ORIGINS = 6 * (2000 - _START)  # 6 families, 2000 rows each
@@ -79,7 +82,8 @@ def test_build_verify_compare_with_fake(
 
     assert cli.main([*_foundation_args("compare", env), "--sample", "20", "--seed", "3"]) == 0
     assert capsys.readouterr().out.splitlines() == [
-        f"OK etth1/fake: compared 20/{_ORIGINS} origins, max_abs 0.000e+00, max_rel 0.000e+00"
+        f"OK etth1/fake: compared 20/{_ORIGINS} origins, max_abs 0.000e+00, "
+        "max_rel 0.000e+00, 0 non-finite values"
     ]
 
 
@@ -140,6 +144,25 @@ def test_compare_rejects_a_nonpositive_sample(
     assert len(out) == 1 and out[0].startswith("FAIL etth1/fake: sample must be")
 
 
+def test_compare_prints_nonfinite_drift_as_inf_and_a_count(
+    env: SimpleNamespace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A NaN stored 0.5 value reaches the compare line as inf maxima and a count."""
+    assert cli.main(_foundation_args("build", env)) == 0
+    capsys.readouterr()
+    series_file = env.root / "etth1" / "fake" / "series" / "0000.f64"
+    raw = bytearray(series_file.read_bytes())
+    struct.pack_into("<d", raw, _POINT * DEFAULT_HORIZON * 8, float("nan"))
+    series_file.write_bytes(bytes(raw))
+    assert (
+        cli.main([*_foundation_args("compare", env), "--sample", str(_ORIGINS), "--seed", "0"]) == 0
+    )
+    assert capsys.readouterr().out.splitlines() == [
+        f"OK etth1/fake: compared {_ORIGINS}/{_ORIGINS} origins, "
+        "max_abs inf, max_rel inf, 1 non-finite values"
+    ]
+
+
 def test_build_synthetic_dev_needs_per_family(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -180,3 +203,15 @@ def test_unknown_model_is_rejected_by_argparse() -> None:
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["foundation", "build", "--dataset", "etth1", "--model", "nope"])
     assert excinfo.value.code == 2
+
+
+def test_model_is_required_by_argparse() -> None:
+    """Leaving out --model is argparse's exit 2 on every subcommand, like --dataset."""
+    for argv in (
+        ["foundation", "build", "--dataset", "etth1"],
+        ["foundation", "verify", "--dataset", "etth1"],
+        ["foundation", "compare", "--dataset", "etth1", "--sample", "5", "--seed", "0"],
+    ):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(argv)
+        assert excinfo.value.code == 2

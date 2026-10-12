@@ -337,7 +337,10 @@ def compare_rebuild(
     row is compared with the stored one. Stored bytes are read as they are,
     without the manifest's SHA-256 gate: integrity is
     :func:`verify_foundation_cache`'s job, and this diagnostic must be able
-    to describe a cache whose numbers drifted. The cache is never written to.
+    to describe a cache whose numbers drifted. A compared value that is not
+    finite is counted in :attr:`RebuildReport.n_nonfinite` and drives both
+    maxima to ``inf`` — non-finite drift never reads as a match. The cache
+    is never written to.
     """
     manifest = read_foundation_manifest(root, dataset, model)
     if adapter.name != manifest.model.name:
@@ -365,6 +368,7 @@ def compare_rebuild(
     stored: dict[int, bytes] = {}
     max_abs = 0.0
     max_rel = 0.0
+    nonfinite = 0
     for index, origin_index in chosen:
         entry = manifest.series[index]
         if index not in stored:
@@ -378,15 +382,21 @@ def compare_rebuild(
             adapter, series[index].values, entry, origin_index, max_context, horizon
         )
         for new, was in zip(fresh[point_quantile], old, strict=True):
-            diff = abs(new - was)
-            max_abs = max(max_abs, diff)
-            max_rel = max(max_rel, diff / max(abs(was), 1e-12))
+            if math.isfinite(new) and math.isfinite(was):
+                diff = abs(new - was)
+                max_abs = max(max_abs, diff)
+                max_rel = max(max_rel, diff / max(abs(was), 1e-12))
+            else:  # non-finite drift must never read as a match (NaN vanishes in max())
+                nonfinite += 1
+                max_abs = math.inf
+                max_rel = math.inf
     return RebuildReport(
         dataset=manifest.dataset,
         model=manifest.model.name,
         seed=seed_ok,
         n_compared=len(chosen),
         n_total=sum(entry.n_origins for entry in manifest.series),
+        n_nonfinite=nonfinite,
         max_abs_diff=max_abs,
         max_rel_diff=max_rel,
     )

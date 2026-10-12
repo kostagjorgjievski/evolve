@@ -5,6 +5,7 @@ import uuid
 import pytest
 
 from evolvets.ledger.payloads import (
+    EVALUATION_STATUSES,
     Acceptance,
     Allocation,
     Baseline,
@@ -14,6 +15,8 @@ from evolvets.ledger.payloads import (
     PayloadError,
     Prediction,
     Proposal,
+    payload_from_dict,
+    payload_to_dict,
 )
 from evolvets.ledger.schema import ZERO_HASH, RecordError, make_record
 
@@ -165,6 +168,124 @@ def test_sealed_pool_in_sealed_stream_allowed(evaluation):
 def test_baseline_bad_pool_rejected(baseline):
     with pytest.raises(PayloadError, match="pool"):
         Baseline(**{**vars(baseline), "pool": "test"})
+
+
+def test_baseline_ok_round_trips_with_and_without_blob(baseline, blob_ref):
+    with_blob = Baseline(**{**vars(baseline), "per_task_blob": blob_ref("per-task")})
+    assert payload_from_dict("baseline", payload_to_dict(with_blob)) == with_blob
+    assert payload_from_dict("baseline", payload_to_dict(baseline)) == baseline
+
+
+@pytest.mark.parametrize("status", sorted(EVALUATION_STATUSES))
+def test_baseline_accepts_every_status(baseline, status):
+    payload = Baseline(
+        **{
+            **vars(baseline),
+            "status": status,
+            "metrics": {} if status != "ok" else {"mase": 0.81},
+            "error": None if status == "ok" else "updater raised ValueError: boom",
+        }
+    )
+    assert payload.status == status
+
+
+@pytest.mark.parametrize("bad", ["done", "", None, "OK"])
+def test_baseline_bad_status_rejected(baseline, bad):
+    with pytest.raises(PayloadError, match="status"):
+        Baseline(**{**vars(baseline), "status": bad})
+
+
+def test_baseline_ok_with_error_rejected(baseline):
+    with pytest.raises(PayloadError, match="error must be None"):
+        Baseline(**{**vars(baseline), "error": "should not be here"})
+
+
+@pytest.mark.parametrize("bad", [None, "", 3])
+def test_baseline_non_ok_without_error_rejected(baseline, bad):
+    with pytest.raises(PayloadError, match="non-empty string"):
+        Baseline(**{**vars(baseline), "status": "failed", "metrics": {}, "error": bad})
+
+
+def test_baseline_non_ok_with_error_accepted(baseline):
+    failed = Baseline(
+        **{**vars(baseline), "status": "failed", "metrics": {}, "error": "ValueError: boom"}
+    )
+    assert failed.error == "ValueError: boom"
+
+
+def test_baseline_non_ok_with_metrics_rejected(baseline):
+    with pytest.raises(PayloadError, match="metrics must be empty"):
+        Baseline(**{**vars(baseline), "status": "failed", "error": "updater crashed"})
+
+
+def test_baseline_timeout_with_empty_metrics_accepted(baseline):
+    timeout = Baseline(
+        **{**vars(baseline), "status": "timeout", "metrics": {}, "error": "series too slow"}
+    )
+    assert timeout.metrics == {}
+
+
+def test_baseline_ok_with_empty_metrics_accepted(baseline):
+    assert Baseline(**{**vars(baseline), "metrics": {}}).metrics == {}
+
+
+@pytest.mark.parametrize("bad", ["sha256:xyz", "abc", 5])
+def test_baseline_bad_per_task_blob_rejected(baseline, bad):
+    with pytest.raises(PayloadError, match="per_task_blob"):
+        Baseline(**{**vars(baseline), "per_task_blob": bad})
+
+
+def test_baseline_failed_with_blob_accepted(baseline, blob_ref):
+    failed = Baseline(
+        **{
+            **vars(baseline),
+            "status": "failed",
+            "metrics": {},
+            "error": "worker died",
+            "per_task_blob": blob_ref("failure-detail"),
+        }
+    )
+    assert failed.per_task_blob is not None
+
+
+@pytest.mark.parametrize("field", ["status", "per_task_blob", "error"])
+def test_baseline_missing_field_rejected(baseline, field):
+    data = payload_to_dict(baseline)
+    del data[field]
+    with pytest.raises(PayloadError, match="missing fields"):
+        payload_from_dict("baseline", data)
+
+
+def test_baseline_unknown_field_rejected(baseline):
+    data = payload_to_dict(baseline)
+    data["mystery"] = 1
+    with pytest.raises(PayloadError, match="unknown fields"):
+        payload_from_dict("baseline", data)
+
+
+def test_baseline_nan_in_hyperparams_rejected(baseline):
+    with pytest.raises(PayloadError, match="non-finite"):
+        Baseline(**{**vars(baseline), "hyperparams": {"learning_rate": float("nan")}})
+
+
+def test_baseline_nan_in_metrics_rejected(baseline):
+    with pytest.raises(PayloadError, match="metrics"):
+        Baseline(**{**vars(baseline), "metrics": {"mase": float("nan")}})
+
+
+def test_sealed_baseline_timeout_in_sealed_stream_allowed(baseline):
+    sealed = Baseline(
+        **{
+            **vars(baseline),
+            "pool": "sealed",
+            "status": "timeout",
+            "metrics": {},
+            "error": "series etth1/HUFL exceeded 600.0s at step 3",
+        }
+    )
+    record = _record("sealed", "baseline", sealed)
+    assert record.payload.pool == "sealed"
+    assert record.payload.status == "timeout"
 
 
 def test_acceptance_requires_bool():

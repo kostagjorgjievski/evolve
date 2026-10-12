@@ -56,19 +56,31 @@ jobs:
         run: |
           echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
           nvidia-smi
+      # Uses the image's own Python (no download from GitHub) and torch 2.6.0,
+      # whose PyPI wheel bundles CUDA 12.4, matching sp-1's driver (550).
+      # Output is tee'd so a failure's last lines show up as an annotation.
       - name: PyTorch CUDA check
         env:
           UV_INDEX_URL: ${{ vars.GPU_PIP_INDEX_URL }}
+          UV_PYTHON_PREFERENCE: only-system
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          uv run --no-project --python 3.11 --with torch python - <<'EOF'
+          cat > /tmp/smoke.py <<'EOF'
           import torch
+          print("torch", torch.__version__, "built for CUDA", torch.version.cuda)
           assert torch.cuda.is_available(), "CUDA not available to PyTorch"
           n = torch.cuda.device_count()
           print(f"{n} visible GPU(s):", [torch.cuda.get_device_name(i) for i in range(n)])
           x = torch.randn(2048, 2048, device="cuda")
           print("matmul ok, checksum", float((x @ x).sum()))
           EOF
+          set +e
+          uv run --no-project --python python3 --with "torch==2.6.0" python /tmp/smoke.py 2>&1 | tee /tmp/smoke.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=PyTorch CUDA check::$(tail -n 15 /tmp/smoke.log | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+          fi
+          exit "$rc"
       - name: Release GPU lock
         if: always()
         # Works even if "Get code" failed: then no GPU was picked and there is

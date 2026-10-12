@@ -1,0 +1,138 @@
+name: GPU foundation cache
+
+# Builds one foundation model's forecast cache for one dataset on the lab GPU
+# (TASK_009). Manual only, and only for the repository owner: this workflow
+# runs on the self-hosted runner, so it must never get a pull_request,
+# issue or comment trigger (scripts/gpu-runner/README.md).
+# Run from the Actions tab -> GPU foundation cache -> Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Model to build"
+        type: choice
+        options: [chronos2, tirex, toto, moirai2, timesfm25]
+        default: chronos2
+      dataset:
+        description: "Dataset"
+        type: choice
+        options: [synthetic-dev, etth1, ecl]
+        default: synthetic-dev
+      gpus:
+        description: "How many free GPUs to request"
+        default: "1"
+      per_family:
+        description: "Synthetic tasks per family (synthetic-dev only)"
+        default: "20"
+      batch_size:
+        description: "Contexts per model call"
+        default: "32"
+
+concurrency:
+  group: gpu-foundation-cache
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.actor == github.repository_owner
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 480
+    env:
+      MODEL: ${{ inputs.model }}
+      DATASET: ${{ inputs.dataset }}
+      PER_FAMILY: ${{ inputs.per_family }}
+      BATCH_SIZE: ${{ inputs.batch_size }}
+      UV_INDEX_URL: ${{ vars.GPU_PIP_INDEX_URL }}
+      UV_PYTHON_PREFERENCE: only-system
+    steps:
+      - name: Get code
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          find . -mindepth 1 -delete
+          git_fetch() {
+            git init -q . &&
+            git -c "http.extraheader=AUTHORIZATION: bearer ${TOKEN}" \
+              -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+              fetch -q --depth 1 --no-tags "https://github.com/${REPO}.git" "${SHA}" &&
+            git checkout -q FETCH_HEAD
+          }
+          if timeout 60 bash -c "$(declare -f git_fetch); git_fetch"; then
+            echo "Got ${SHA} with git"
+          else
+            echo "git unavailable from $(hostname); downloading tarball via api.github.com"
+            find . -mindepth 1 -delete
+            curl -fsSL --retry 5 --retry-delay 10 --max-time 300 \
+              -H "Authorization: Bearer ${TOKEN}" \
+              "https://api.github.com/repos/${REPO}/tarball/${SHA}" \
+              | tar -xz --strip-components=1
+          fi
+          test -f .github/scripts/gpu-pick.sh
+      - name: Pick free GPU(s)
+        run: bash .github/scripts/gpu-pick.sh "${{ inputs.gpus }}"
+      - name: Prepare paths and dependency group
+        run: |
+          set -euo pipefail
+          base="${EVOLVETS_DATA:-/data}/evolve"
+          mkdir -p "$base"
+          case "$MODEL" in
+            chronos2)  group=fm-chronos ;;
+            tirex)     group=fm-tirex ;;
+            toto)      group=fm-toto ;;
+            moirai2)   group=fm-moirai ;;
+            timesfm25) group=fm-timesfm ;;
+            *) echo "unknown model $MODEL"; exit 1 ;;
+          esac
+          {
+            echo "GROUP=$group"
+            echo "DATA_ROOT=$base/data"
+            echo "CACHE_ROOT=$base/cache_store"
+            echo "FM_ROOT=$base/foundation_cache"
+            echo "UV_PROJECT_ENVIRONMENT=$base/venv-$group"
+          } >> "$GITHUB_ENV"
+          nvidia-smi
+          echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+      - name: Public data and the simple cache (reused if already built)
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          run() { uv run --locked --python 3.11 evolvets "$@"; }
+          if [ "$DATASET" != "synthetic-dev" ]; then
+            run data verify "$DATASET" --data-root "$DATA_ROOT" \
+              || { run data fetch "$DATASET" --data-root "$DATA_ROOT"; \
+                   run data prepare "$DATASET" --data-root "$DATA_ROOT"; }
+            run cache build "$DATASET" --cache-root "$CACHE_ROOT" --data-root "$DATA_ROOT"
+          else
+            run cache build synthetic-dev --per-family "$PER_FAMILY" \
+              --cache-root "$CACHE_ROOT" --data-root "$DATA_ROOT"
+          fi
+      - name: Smoke check on the GPU
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run --locked --python 3.11 --group "$GROUP" \
+            evolvets foundation smoke --model "$MODEL" --device cuda
+      - name: Build the foundation cache
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          args=(--dataset "$DATASET" --model "$MODEL" --device cuda --batch-size "$BATCH_SIZE"
+                --root "$FM_ROOT" --cache-root "$CACHE_ROOT" --data-root "$DATA_ROOT")
+          if [ "$DATASET" = "synthetic-dev" ]; then args+=(--per-family "$PER_FAMILY"); fi
+          uv run --locked --python 3.11 --group "$GROUP" evolvets foundation build "${args[@]}"
+      - name: Verify the cache against its manifest
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run --locked --python 3.11 --group "$GROUP" \
+            evolvets foundation verify --dataset "$DATASET" --model "$MODEL" --root "$FM_ROOT"
+      - name: Release GPU lock
+        if: always()
+        run: |
+          if [ -f .github/scripts/gpu-release.sh ]; then
+            bash .github/scripts/gpu-release.sh
+          else
+            echo "No GPU locks held."
+          fi

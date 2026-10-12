@@ -50,16 +50,24 @@ DEFAULT_CONFIGS: Mapping[str, Mapping[str, ConfigValue]]
 #  "fixed_share": {"eta": 1.0, "alpha": 0.01}, "adahedge": {}}
 
 
-class Equal: ...        # each satisfies evolvets.updater.interfaces.Updater
+class Equal: ...  # each satisfies evolvets.updater.interfaces.Updater
+
+
 class FollowTheLeader: ...
+
+
 class Hedge: ...
+
+
 class FixedShare: ...
+
+
 class AdaHedge: ...
 
 
-def equal() -> Updater: ...        # zero-argument factories, one per id;
-def ftl() -> Updater: ...          # "evolvets.updater.baselines:<id>" is a valid
-def hedge() -> Updater: ...        # sealed updater_ref for each of them
+def equal() -> Updater: ...  # zero-argument factories, one per id;
+def ftl() -> Updater: ...  # "evolvets.updater.baselines:<id>" is a valid
+def hedge() -> Updater: ...  # sealed updater_ref for each of them
 def fixed_share() -> Updater: ...
 def adahedge() -> Updater: ...
 

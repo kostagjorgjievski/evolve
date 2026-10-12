@@ -187,11 +187,18 @@ Dependencies: none. Size: ~400 lines. If it grows, split the CLI and `compare_re
 
 ---
 
-## PR C: `feat/foundation-models`
+## PR C: five real adapters, one model per PR (C1 to C5)
 
-The five real adapters, their pinned registry entries, and the dependency groups.
+**Why split (decided after two developer runs hit the 60-minute limit on the unsplit version):** each run must finish in well under an hour. C1 builds the shared machinery and the first model. C2 to C5 add one model each and follow C1's pattern exactly. Open them in this order and stop after each one for review: `feat/foundation-models-chronos2` (C1), `feat/foundation-models-tirex` (C2), `feat/foundation-models-toto` (C3), `feat/foundation-models-moirai2` (C4), `feat/foundation-models-timesfm25` (C5).
 
-### Files
+**Time box and fallbacks (all of C1 to C5):**
+
+- Spend at most ~15 minutes of a run looking up a model's facts. Use the model's official Hugging Face card and repository. For `hf_revision`, read the current commit hash of the model repo (`https://huggingface.co/api/models/<id>` field `sha`) and pin that hash.
+- A field you cannot verify gets the literal `"unknown"` (for `license`, `pretraining_overlap` values and `overlap_source`). Say so in the PR description. Never guess, and never block the PR on it: the reviewer decides.
+- If the model's library cannot be installed with `torch==2.6.*`, or its `smoke` check fails on CPU after one honest attempt at fixing it, do not keep trying. Leave the model out of the registry's built set, open a `needs-human` issue naming the exact error, and stop.
+- Do not spend a run reading other models' libraries. Only the model of the current PR matters.
+
+### Shared design (introduced in C1, reused by C2 to C5)
 
 `foundation/models/<name>.py`, one per model. Each defines `make_adapter(spec: ModelSpec, device: str) -> Adapter`. Heavy imports happen inside `make_adapter`. Each adapter:
 
@@ -199,24 +206,35 @@ The five real adapters, their pinned registry entries, and the dependency groups
 - left-pads or otherwise handles variable-length contexts as that library documents. Contexts in one batch must not affect each other (no cross-series attention or context);
 - returns the nine quantiles in `QUANTILES` order. If the library returns other quantile levels, it interpolates linearly between the nearest levels it has; if it returns samples, it takes empirical quantiles. Both are recorded in the adapter's docstring and in the manifest (`model.quantile_method`).
 
-The registry gets the verified `hf_model_id`, a pinned `hf_revision` (a commit hash, not a branch), `license`, `pretraining_overlap` with `overlap_source`, and `max_context`. Use the largest context the model card supports, capped at 4096.
+The registry entry for the model gets the verified `hf_model_id`, a pinned `hf_revision` (a commit hash, not a branch), `license`, `pretraining_overlap` with `overlap_source`, and `max_context` (the largest context the model card supports, capped at 4096).
 
-### Exact behaviour
+`foundation/models/__init__.py` holds `load_adapter(name: str, device: str) -> Adapter`. It looks the name up in the registry, imports `foundation.models.<name>` lazily, and raises `FoundationError` naming the dependency group when the library is missing.
 
-- `evolvets foundation build --model <name>` resolves the adapter through the registry and fails with a clear message if that model's dependency group is not installed (name the group).
+### C1: `feat/foundation-models-chronos2` (Chronos-2, plus everything shared)
+
+Adds: `load_adapter`; the `fm-chronos` dependency group (and `uv.lock`); the `chronos2` adapter and its registry entry; `evolvets foundation build --model chronos2` resolving through `load_adapter` (replacing PR B's "arrives in PR C" error for models that exist); `evolvets foundation smoke --model <name> [--device auto]`; and the `foundation` pytest marker registered in `pyproject.toml`.
+
 - Model weights come from Hugging Face. The endpoint is whatever `HF_ENDPOINT` is set to in the environment (on the lab runner it points at a mirror). Never hard-code an endpoint or token.
-- `evolvets foundation smoke --model <name> [--device auto]`: forecasts a fixed sine plus trend of length 512 at 20 origins with batch sizes 1 and 16. It checks shapes and finiteness, that batch size changes the 0.5 quantile by at most 1e-3 relative, and that the forecast's MAE beats the naive forecast's MAE on that series. It prints a one-line JSON summary.
+- `smoke`: forecasts a fixed sine plus trend of length 512 at 20 origins with batch sizes 1 and 16. It checks shapes and finiteness, that batch size changes the 0.5 quantile by at most 1e-3 relative, and that the forecast's MAE beats the naive forecast's MAE on that series. It prints a one-line JSON summary.
+- Registry entries for the other four models are added by their own PRs, not here. The registry's five model names stay in the order fixed by PR A (a model not yet added still has its PR A placeholder entry, with `hf_revision = "unpinned"`).
 
-### Tests (all required; `tests/foundation/test_models.py`)
+Tests for C1 (all required; `tests/foundation/test_models.py`):
 
-1. For every model in the registry: `hf_revision` is a 40-character hex commit hash, `license` is not empty, and `overlap_source` is a URL.
-2. For every model, with `pytest.importorskip` on its library and `@pytest.mark.foundation`: `smoke` passes on CPU with a context of 64. These run in the GPU workflow, not in CI.
-3. Without the library installed, `build --model <name>` exits nonzero and names the missing group. This runs in CI.
-4. `import evolvets.foundation.models.<name>` does not import torch (subprocess check, as in PR A test 9).
+1. For `chronos2`: `hf_revision` is a 40-character hex commit hash, and `license` and `overlap_source` are non-empty (the literal `"unknown"` is allowed for the last two only, if it is stated in the PR).
+2. With `pytest.importorskip("chronos")` and `@pytest.mark.foundation`: `smoke` passes on CPU with a context of 64. It runs in the GPU workflow, not in CI.
+3. Without the library installed, `build --model chronos2` exits nonzero and names the missing group `fm-chronos`. This runs in CI.
+4. `import evolvets.foundation.models.chronos2` does not import torch (subprocess check, as in PR A test 9).
+5. `load_adapter` raises `FoundationError` for an unknown name, and for a known name whose library is missing.
 
-Dependencies: the five dependency groups, as described under "Rules". Size: ~80–120 lines per adapter. If the PR exceeds ~500 lines, split it into `feat/foundation-models-1` (Chronos-2, TiRex, Toto) and `feat/foundation-models-2` (Moirai 2.0, TimesFM 2.5).
+Size: ~300 lines. Dependencies: the `fm-chronos` group only.
 
-**After PR C merges:** the human adds the GPU workflow `gpu-foundation-cache.yml`. It runs on `[self-hosted, gpu]`, takes inputs `model`, `dataset` and `gpus`, and runs `gpu-pick.sh`, `smoke`, `build`, `verify` and `gpu-release.sh`. The cache is written to the runner's persistent data volume. The developer then opens `chore/foundation-manifests`, which commits each built manifest (hashes only, no forecasts) under `data/manifests/foundation/<dataset>/<model>.json`.
+### C2 to C5: one model each
+
+Each of `tirex` (group `fm-tirex`), `toto` (`fm-toto`), `moirai2` (`fm-moirai`) and `timesfm25` (`fm-timesfm`) adds: its dependency group (and `uv.lock`), `foundation/models/<name>.py`, its filled-in registry entry, and the same four tests as C1 tests 1 to 4 for that model. Nothing else changes. If the model's library needs a different torch pin, stop and open a `needs-human` issue instead of changing the pin. Size: ~120 lines each.
+
+**After C1 merges and Chronos-2 passes the GPU smoke test**, the human adds the GPU workflow `gpu-foundation-cache.yml` (see below) so a first cache can be built while C2 to C5 are written. C5 changes this file's first-line status only if PR D is already done; otherwise the last PR of the whole task does.
+
+**GPU workflow** (human-applied): `gpu-foundation-cache.yml` runs on `[self-hosted, gpu]`, takes inputs `model`, `dataset` and `gpus`, and runs `gpu-pick.sh`, `smoke`, `build`, `verify` and `gpu-release.sh`. The cache is written to the runner's persistent data volume. The developer then opens `chore/foundation-manifests`, which commits each built manifest (hashes only, no forecasts) under `data/manifests/foundation/<dataset>/<model>.json`.
 
 ---
 

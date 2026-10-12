@@ -78,3 +78,11 @@ docker exec evolve-gpu-runner curl -sI -m 15 https://codeload.github.com | head 
 ```
 
 If these fail but the same `curl` works on sp-1 itself, recreate the container with the host's network by adding `--network host` to the `docker run` above (the registration in the `evolve-runner` volume is kept). If the lab has an HTTP proxy, add `-e https_proxy=http://<proxy>:<port> -e no_proxy=localhost,127.0.0.1` instead; the runner passes it on to every job.
+
+## The repository is public: keep the runner locked down
+
+A self-hosted runner on a public repo can be targeted by pull requests from forks. Rules:
+
+- Settings -> Actions -> General -> Fork pull request workflows: **Require approval for all outside collaborators**. Never approve a fork PR's run unless you have read every changed file, including `.github/`.
+- No workflow that runs on `[self-hosted, gpu]` may be triggered by `pull_request`, `pull_request_target`, `issues` or `issue_comment`. Only `workflow_dispatch` (owner-only) is allowed.
+- Keep the runner stopped when it is not building: `docker stop evolve-gpu-runner`, and `docker start evolve-gpu-runner` before a GPU job.

@@ -136,3 +136,23 @@ class FoundationSeries:
                 f"for series {self.series_id!r}"
             )
         return (origin_index * len(QUANTILES) + quantile) * self.horizon
+
+
+@dataclass(frozen=True)
+class RebuildReport:
+    """What :func:`evolvets.foundation.store.compare_rebuild` found on one cache.
+
+    GPU forecasts are not bit-reproducible, so a recompute is expected to
+    differ slightly from the stored bytes; the report quantifies that drift
+    over the sampled origins. It is a diagnostic: it never edits the cache,
+    and it says nothing about integrity — file bytes are verified against the
+    manifest by :func:`evolvets.foundation.store.verify_foundation_cache`.
+    """
+
+    dataset: str
+    model: str
+    seed: int
+    n_compared: int  # origins recomputed
+    n_total: int  # every (series, origin) pair the cache holds
+    max_abs_diff: float  # max |recomputed - stored| over the 0.5-quantile rows
+    max_rel_diff: float  # max of that divided by max(|stored|, 1e-12)

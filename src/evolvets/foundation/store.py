@@ -14,7 +14,9 @@ renamed into place only once the manifest (written last) is complete. GPU
 forecasts are not bit-reproducible, so an existing final directory always
 refuses the build, naming its cache id, instead of being compared with a
 rebuild (TASK_006's rule with "rebuild and compare equal" replaced by
-"built once, content-hashed, verified by hash").
+"built once, content-hashed, verified by hash"). :func:`compare_rebuild`
+is the read-only diagnostic that quantifies recompute drift on a sample of
+origins; it never edits the cache.
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
+import struct
 import sys
 import time
 from array import array
@@ -33,7 +37,7 @@ from evolvets.cache.interfaces import CacheManifest, SeriesInput
 from evolvets.cache.store import DEFAULT_HORIZON, CacheError, cache_id, read_manifest
 from evolvets.experts.pool import first_origin
 from evolvets.foundation import FOUNDATION_CACHE_VERSION
-from evolvets.foundation.build import forecast_series
+from evolvets.foundation.build import _checked_row, _fix_crossing, forecast_series
 from evolvets.foundation.errors import FoundationError
 from evolvets.foundation.interfaces import (
     QUANTILES,
@@ -41,6 +45,7 @@ from evolvets.foundation.interfaces import (
     FoundationManifest,
     FoundationSeries,
     FoundationSeriesEntry,
+    RebuildReport,
     SeriesForecast,
 )
 from evolvets.foundation.registry import ModelSpec
@@ -308,6 +313,168 @@ def load_foundation_series(
         data=data,
         sorted_steps=entry.sorted_steps,
     )
+
+
+def compare_rebuild(
+    root: Path,
+    dataset: str,
+    model: str,
+    adapter: Adapter,
+    sample: int,
+    seed: int,
+    data_root: Path = Path("data"),
+    manifest_dir: Path = Path("data/manifests"),
+) -> RebuildReport:
+    """Recompute a seeded sample of origins and diff the 0.5 quantile against the cache.
+
+    The sample is drawn without replacement from every ``(series, origin)``
+    pair the cache holds, so it spreads over the series in proportion to
+    their origin counts; a ``sample`` at least that large compares them all.
+    Each sampled origin's context is rebuilt exactly as the build built it —
+    ``values[max(0, t + 1 - L) : t + 1]`` with the manifest's ``max_context``
+    — recomputed through ``adapter`` one context at a time, validated and
+    monotone-fixed exactly like the builder's output, and its 0.5-quantile
+    row is compared with the stored one. Stored bytes are read as they are,
+    without the manifest's SHA-256 gate: integrity is
+    :func:`verify_foundation_cache`'s job, and this diagnostic must be able
+    to describe a cache whose numbers drifted. The cache is never written to.
+    """
+    manifest = read_foundation_manifest(root, dataset, model)
+    if adapter.name != manifest.model.name:
+        raise FoundationError(
+            f"adapter name {adapter.name!r} does not match the cached model {manifest.model.name!r}"
+        )
+    sample_ok = _int_at_least("sample", sample, 1)
+    seed_ok = _int_at_least("seed", seed, 0)
+    max_context = manifest.model.max_context
+    if max_context < 1:
+        raise FoundationError(
+            f"model {manifest.model.name!r}: max_context must be >= 1 to recompute, "
+            f"got {max_context}"
+        )
+    horizon = manifest.horizon
+    point_quantile = QUANTILES.index(0.5)
+
+    source, series = public_inputs(
+        manifest.dataset, Path(data_root), Path(manifest_dir), _per_family_from_source(manifest)
+    )
+    _match_manifest_inputs(manifest, series, source)
+
+    base = _cache_dir(root, manifest.dataset, manifest.model.name)
+    chosen = _sampled_origins(manifest, sample_ok, seed_ok)
+    stored: dict[int, bytes] = {}
+    max_abs = 0.0
+    max_rel = 0.0
+    for index, origin_index in chosen:
+        entry = manifest.series[index]
+        if index not in stored:
+            stored[index] = _read_series_file(base, entry, horizon)
+        old = struct.unpack_from(
+            f"<{horizon}d",
+            stored[index],
+            (origin_index * _N_QUANTILES + point_quantile) * horizon * 8,
+        )
+        fresh = _recomputed_point(
+            adapter, series[index].values, entry, origin_index, max_context, horizon
+        )
+        for new, was in zip(fresh[point_quantile], old, strict=True):
+            diff = abs(new - was)
+            max_abs = max(max_abs, diff)
+            max_rel = max(max_rel, diff / max(abs(was), 1e-12))
+    return RebuildReport(
+        dataset=manifest.dataset,
+        model=manifest.model.name,
+        seed=seed_ok,
+        n_compared=len(chosen),
+        n_total=sum(entry.n_origins for entry in manifest.series),
+        max_abs_diff=max_abs,
+        max_rel_diff=max_rel,
+    )
+
+
+# --- rebuild comparison -----------------------------------------------------------------
+
+
+def _per_family_from_source(manifest: FoundationManifest) -> int | None:
+    """Return the ``per_family`` a synthetic cache was built with (None for real data)."""
+    if manifest.source.get("kind") != "synthetic":
+        return None
+    raw = manifest.source.get("per_family")
+    try:
+        count = int(raw) if isinstance(raw, str) else 0
+    except ValueError:
+        count = 0
+    if count < 1:
+        raise FoundationError(
+            f"manifest source records per_family {raw!r}; a synthetic cache can only be "
+            "compared against the per-family count it was built with"
+        )
+    return count
+
+
+def _match_manifest_inputs(
+    manifest: FoundationManifest, series: Sequence[SeriesInput], source: Mapping[str, str]
+) -> None:
+    """Refuse public inputs that no longer match the cache, before recomputing anything."""
+    if dict(source) != manifest.source:
+        raise FoundationError(
+            f"dataset {manifest.dataset!r}: the public inputs' source {dict(source)} no longer "
+            f"matches the manifest's {manifest.source}; the cache was built from different inputs"
+        )
+    inputs_ids = [entry.series_id for entry in series]
+    cached_ids = [entry.series_id for entry in manifest.series]
+    if inputs_ids != cached_ids:
+        raise FoundationError(
+            f"dataset {manifest.dataset!r}: the public inputs' series {inputs_ids} no longer "
+            f"match the cache's {cached_ids}, so they cannot be compared origin for origin"
+        )
+    for entry, cached in zip(series, manifest.series, strict=True):
+        problems = []
+        if entry.period != cached.period:
+            problems.append(f"period {entry.period} != {cached.period}")
+        if len(entry.values) != cached.length:
+            problems.append(f"length {len(entry.values)} != {cached.length}")
+        if sha256_hex(canonical_bytes(list(entry.values))) != cached.values_sha256:
+            problems.append("values differ (values_sha256)")
+        if problems:
+            raise FoundationError(
+                f"dataset {manifest.dataset!r}: series {entry.series_id!r} no longer matches the "
+                f"cached inputs ({'; '.join(problems)}); the cache was built from different "
+                "public values"
+            )
+
+
+def _sampled_origins(manifest: FoundationManifest, sample: int, seed: int) -> list[tuple[int, int]]:
+    """Return ``sample`` seeded ``(series index, origin index)`` pairs, or all of them."""
+    pairs = [
+        (index, origin)
+        for index, entry in enumerate(manifest.series)
+        for origin in range(entry.n_origins)
+    ]
+    if sample >= len(pairs):
+        return pairs
+    return sorted(random.Random(seed).sample(pairs, sample))
+
+
+def _recomputed_point(
+    adapter: Adapter,
+    values: Sequence[float],
+    entry: FoundationSeriesEntry,
+    origin_index: int,
+    max_context: int,
+    horizon: int,
+) -> list[list[float]]:
+    """Forecast one origin through ``adapter`` on the builder's exact context, and fix crossing."""
+    t = entry.first_origin + origin_index
+    context = values[max(0, t + 1 - max_context) : t + 1]
+    output = adapter.forecast([context], horizon)
+    if len(output) != 1:
+        raise FoundationError(
+            f"{adapter.name}: origin {t}: 1 context sent, {len(output)} forecast rows returned"
+        )
+    row = _checked_row(adapter.name, t, output[0], horizon)
+    _fix_crossing([row], horizon)
+    return row
 
 
 # --- input and simple-cache checks -----------------------------------------------------

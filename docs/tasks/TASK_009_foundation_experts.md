@@ -1,4 +1,4 @@
-Status: active
+Status: done (PR A merged as #56; PR B split by the size rule: the on-disk cache in #57, the CLI and compare_rebuild diagnostic in #58; PR C cut to one model per PR (plan #60) after Toto (issue #64) and Moirai 2.0 (issue #66) were dropped: chronos-2 in #61, TiRex in #63, TimesFM 2.5 in #70; PR D split by the size rule: the dev pool in #72, the sealed pools, build and server in #76)
 
 # Task 009: Foundation-model experts and their forecast caches
 

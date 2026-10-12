@@ -121,6 +121,41 @@ def build_foundation_cache(
     complete. An installed cache is never overwritten or compared with a
     rebuild: the build refuses, naming the existing cache id.
     """
+    dataset_name = _check_name("dataset", dataset)
+    try:
+        source, series = public_inputs(
+            dataset_name, Path(data_root), Path(manifest_dir), per_family
+        )
+    except CacheError as exc:
+        raise FoundationError(f"dataset {dataset_name!r}: {exc}") from exc
+    return build_foundation_cache_from_inputs(
+        dataset, adapter, spec, root, cache_root, source, series, batch_size
+    )
+
+
+def build_foundation_cache_from_inputs(
+    dataset: str,
+    adapter: Adapter,
+    spec: ModelSpec,
+    root: Path,
+    cache_root: Path,
+    source: Mapping[str, str],
+    series: Sequence[SeriesInput],
+    batch_size: int,
+) -> FoundationManifest:
+    """Compute one model's forecasts over caller-resolved series and install them as a cache.
+
+    The builder :func:`build_foundation_cache` uses, over inputs the caller
+    resolved: ``series`` must join the simple cache under ``cache_root``
+    series for series and origin for origin, checked before the adapter is
+    called once, and the horizon is :data:`DEFAULT_HORIZON`. Trusted callers
+    only — the public build resolves its own inputs through
+    :func:`evolvets.cache.datasets.public_inputs`, and the one other caller is
+    the arena's sealed code path (TASK_009 PR D), which passes the sealed
+    pool's series and the sealed cache root; agent-editable packages can
+    neither import that path nor reach the data it serves. The resume,
+    never-overwrite and manifest rules are exactly the public build's.
+    """
     started = time.monotonic()
     dataset_name = _check_name("dataset", dataset)
     model_name = _check_name("model", spec.name)
@@ -134,13 +169,9 @@ def build_foundation_cache(
             f"model {spec.name!r}: max_context must be >= 1, got {spec.max_context}"
         )
     horizon = DEFAULT_HORIZON
+    source_map = dict(source)
+    inputs = tuple(series)
 
-    try:
-        source, series = public_inputs(
-            dataset_name, Path(data_root), Path(manifest_dir), per_family
-        )
-    except CacheError as exc:
-        raise FoundationError(f"dataset {dataset_name!r}: {exc}") from exc
     try:
         simple = read_manifest(Path(cache_root), dataset_name)
         simple_id = cache_id(Path(cache_root), dataset_name)
@@ -148,7 +179,7 @@ def build_foundation_cache(
         raise FoundationError(
             f"the simple cache for dataset {dataset_name!r} is missing or unusable: {exc}"
         ) from exc
-    _match_simple_cache(dataset_name, series, simple)
+    _match_simple_cache(dataset_name, inputs, simple)
 
     base = Path(root) / dataset_name
     final = base / model_name
@@ -164,7 +195,7 @@ def build_foundation_cache(
                 "model": _spec_obj(spec),
                 "horizon": horizon,
                 "batch_size": batch,
-                "source": dict(source),
+                "source": source_map,
             }
         )
     )[:16]
@@ -173,7 +204,7 @@ def build_foundation_cache(
     state = _read_state(partial)
 
     entries: list[FoundationSeriesEntry] = []
-    for index, entry in enumerate(series):
+    for index, entry in enumerate(inputs):
         start = first_origin(entry.period)
         n_origins = len(entry.values) - start
         expected = n_origins * _N_QUANTILES * horizon * 8
@@ -211,7 +242,7 @@ def build_foundation_cache(
     manifest = FoundationManifest(
         foundation_cache_version=FOUNDATION_CACHE_VERSION,
         dataset=dataset_name,
-        source=dict(source),
+        source=source_map,
         horizon=horizon,
         quantiles=QUANTILES,
         model=spec,

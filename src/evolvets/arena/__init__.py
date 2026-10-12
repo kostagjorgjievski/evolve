@@ -9,7 +9,10 @@ updater receives, what it may return, which origins are scored, any metric
 value, or what the sealed process layout promises a caller must bump it.
 Version 2 added the pool spec: a replay may now drive the simple five plus
 cached foundation experts (``simple+foundation``); a ``simple`` replay is
-bit-identical to version 1. This file stays import-free.
+bit-identical to version 1. The sealed pools serve the same spec — their
+foundation caches are built and joined under the sealed cache root, and the
+sealed server's request carries the spec and the model names. This file
+stays import-free.
 """
 
 ARENA_VERSION = "2"

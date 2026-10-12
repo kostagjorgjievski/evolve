@@ -35,10 +35,10 @@ Goal: answer question 1 and have every piece of measurement infrastructure froze
 
 Parallel track (PR 8 has landed; entry 12 approved by the owner on 2026-10-12):
 
-| # | Branch | Content |
-|---|---|---|
-| 12 | `feat/foundation-experts` | Chronos-2, TiRex, TimesFM 2.5 as cached experts, built on the lab GPU (approved; TASK_009). Toto dropped: needs torch 2.7 or Python 3.12 (issue #64). Moirai 2.0 dropped: uni2ts needs torch<2.5 and the license is non-commercial (issue #66). Revisit if the project's torch/Python pins change |
-| 13 | `feat/live-commit` | Daily public, timestamped forecast commitments from generation 0 onward |
+| # | Branch | Content | Status |
+|---|---|---|---|
+| 12 | `feat/foundation-experts` | Chronos-2, TiRex, TimesFM 2.5 as cached experts, built on the lab GPU (approved; TASK_009). Toto dropped: needs torch 2.7 or Python 3.12 (issue #64). Moirai 2.0 dropped: uni2ts needs torch<2.5 and the license is non-commercial (issue #66). Revisit if the project's torch/Python pins change | merged (#56, #57, #58, #61, #63, #70, #72, #76) |
+| 13 | `feat/live-commit` | Daily public, timestamped forecast commitments from generation 0 onward | spec pending |
 
 ## Phase 1: the loop with an API LLM (questions 2 and 3)
 

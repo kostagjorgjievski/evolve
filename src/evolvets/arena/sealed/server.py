@@ -26,6 +26,7 @@ from evolvets.arena import ARENA_VERSION
 from evolvets.arena.dev import DevPool
 from evolvets.arena.errors import ArenaError
 from evolvets.arena.evaluate import replay_dataset, result_to_obj
+from evolvets.arena.pool import pool_leakage_risk
 from evolvets.arena.sealed.pools import load_sealed_pool
 from evolvets.arena.sealed.remote import RemoteUpdaterFactory, SeriesTimeout
 from evolvets.arena.versions import protocol_versions
@@ -40,7 +41,9 @@ from evolvets.ledger.store import (
     LedgerWriter,
 )
 
-_REQUEST_KEYS = frozenset({"dataset", "updater_id", "updater_ref", "config", "seed"})
+_REQUEST_KEYS = frozenset(
+    {"dataset", "updater_id", "updater_ref", "config", "seed", "pool_spec", "foundation_models"}
+)
 _PATHS_KEYS = frozenset({"data_root", "manifest_dir", "sealed_cache_root"})
 
 
@@ -132,6 +135,8 @@ def _evaluate_and_record(
         Path(str(paths["data_root"])),
         Path(str(paths["manifest_dir"])),
         Path(str(paths["sealed_cache_root"])),
+        pool_spec=str(request["pool_spec"]),
+        foundation_models=_request_models(request["foundation_models"]),
     )
     factory = RemoteUpdaterFactory(
         [series.series_id for series in pool.series], str(request["updater_ref"]), timeout
@@ -186,7 +191,9 @@ def _replay(
 
     A :class:`SeriesTimeout` — a ``BaseException`` — becomes the timeout
     outcome: ``result_to_obj``'s key set with ``status = "timeout"``, the
-    failing series and step, and no metrics or per-series scores.
+    failing series and step, and no metrics or per-series scores. The pool
+    keys travel with a timeout exactly as with an ok result, so a blob names
+    its pool whatever the outcome was.
     """
     try:
         result = replay_dataset(factory, request["config"], request["seed"], pool)
@@ -196,6 +203,9 @@ def _replay(
             "dataset": pool.dataset,
             "cache_id": pool.cache_id,
             "arena_version": ARENA_VERSION,
+            "pool_spec": pool.pool_spec,
+            "foundation_cache_ids": [cache.cache_id for cache in pool.foundation],
+            "leakage_risk": pool_leakage_risk(pool.dataset, pool.foundation),
             "status": "timeout",
             "error": error,
             "failed_series": exc.series_id,
@@ -205,6 +215,19 @@ def _replay(
         }
         return "timeout", error, {}, result_obj
     return result.status, result.error, dict(result.metrics), result_to_obj(result)
+
+
+def _request_models(raw: object) -> list[str] | None:
+    """Return the request's foundation model names, or ``None`` for the default pool."""
+    if raw is None:
+        return None
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or any(not isinstance(name, str) or not name for name in raw)
+    ):
+        raise ArenaError(f"foundation_models must be a non-empty list of model names, got {raw!r}")
+    return [str(name) for name in raw]
 
 
 def _reply(conn: Connection, message: dict[str, object]) -> None:

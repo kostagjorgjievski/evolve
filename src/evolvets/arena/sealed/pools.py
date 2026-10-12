@@ -8,7 +8,10 @@ real sealed datasets are read from ``<dataset>.sealed.json`` and tied to the
 public data by the prefix check, so a sealed file that does not extend the
 public one is refused. Sealed caches live outside the public cache root and
 hold forecasts cut at ``sealed.end + horizon``: nothing from the reserve
-segment ever enters one.
+segment ever enters one. A sealed pool's foundation caches (TASK_009 PR D)
+live under the same sealed cache root, one directory per model beside the
+simple cache's series, and are built and joined by exactly the code that
+builds and joins the public ones.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +31,7 @@ from evolvets.arena.dev import (
     match_values,
 )
 from evolvets.arena.errors import ArenaError
+from evolvets.arena.pool import FoundationCache, check_pool_spec, load_foundation_caches
 from evolvets.arena.realdata import REALDATA_VERSION
 from evolvets.arena.realdata.fetch import file_sha256
 from evolvets.arena.realdata.manifest import manifest_text, write_atomic
@@ -49,11 +54,18 @@ from evolvets.cache.store import (
     cache_id,
     read_manifest,
 )
+from evolvets.foundation.errors import FoundationError
+from evolvets.foundation.interfaces import Adapter, FoundationManifest
+from evolvets.foundation.registry import ModelSpec
+from evolvets.foundation.store import build_foundation_cache_from_inputs
 from evolvets.ledger.canonical import sha256_hex
 
 SALT_BYTES = 32
 SYNTHETIC_MANIFEST_VERSION = "1"
 _REAL_PERIOD = 24
+#: Directory names that mark a path as one of the two public cache roots; a
+#: sealed cache root that is or sits under either is refused.
+_PUBLIC_ROOT_NAMES = ("cache_store", "foundation_cache")
 
 _HEX = set("0123456789abcdef")
 _MANIFEST_KEYS = (
@@ -212,24 +224,77 @@ def build_sealed_cache(
         raise ArenaError(str(exc)) from exc
 
 
+def build_sealed_foundation_cache(
+    dataset: str,
+    adapter: Adapter,
+    spec: ModelSpec,
+    data_root: Path,
+    manifest_dir: Path,
+    sealed_cache_root: Path,
+    batch_size: int,
+) -> FoundationManifest:
+    """Build one model's foundation cache for a sealed pool, under the sealed cache root.
+
+    The same adapter and builder as the public build
+    (:func:`evolvets.foundation.store.build_foundation_cache`), run from
+    inside the arena's sealed code path: the inputs are the sealed pool's own
+    series (:func:`sealed_inputs`, cut at ``sealed.end + horizon``, so no
+    value from a reserve segment is ever forecast), the simple cache the
+    forecasts must join is the sealed simple cache, and the cache under
+    construction is installed at ``<sealed_cache_root>/<dataset>/<model>/``
+    beside it. A root that is or sits under ``cache_store/`` or
+    ``foundation_cache/`` is refused, so no sealed forecast can land in a
+    directory a public tool reads.
+    """
+    if dataset not in SEALED_DATASETS:
+        raise ArenaError(f"unknown dataset {dataset!r}; expected one of {list(SEALED_DATASETS)}")
+    root = _checked_cache_root(sealed_cache_root)
+    source, series = sealed_inputs(dataset, Path(data_root), Path(manifest_dir), DEFAULT_HORIZON)
+    try:
+        return build_foundation_cache_from_inputs(
+            dataset, adapter, spec, root, root, source, series, batch_size
+        )
+    except FoundationError as exc:
+        raise ArenaError(str(exc)) from exc
+
+
 def load_sealed_pool(
-    dataset: str, data_root: Path, manifest_dir: Path, sealed_cache_root: Path
+    dataset: str,
+    data_root: Path,
+    manifest_dir: Path,
+    sealed_cache_root: Path,
+    *,
+    pool_spec: str = "simple",
+    foundation_models: Sequence[str] | None = None,
 ) -> DevPool:
     """Load the sealed pool for ``dataset`` from its sealed cache and sealed data.
 
     The pool is the dev replay's own type, so :func:`replay_dataset` and its
-    scoring run on sealed pools unchanged. Every failure — an unknown
-    dataset, a missing or tampered sealed cache, missing or tampered sealed
-    data — surfaces as :class:`ArenaError`.
+    scoring run on sealed pools unchanged. With
+    ``pool_spec="simple+foundation"`` the foundation caches built under
+    ``sealed_cache_root`` by :func:`build_sealed_foundation_cache` are loaded
+    and joined onto the sealed simple cache exactly as the dev pool joins its
+    own — both caches share the root, so there is no separate foundation root
+    to pass; ``foundation_models`` names the models (tests name the fake) and
+    defaults to the pinned registry entries. Every failure — an unknown
+    dataset, a bad pool spec, a missing or tampered sealed cache, a foundation
+    cache that does not join, missing or tampered sealed data — surfaces as
+    :class:`ArenaError`.
     """
     if dataset not in SEALED_DATASETS:
         raise ArenaError(f"unknown dataset {dataset!r}; expected one of {list(SEALED_DATASETS)}")
+    spec = check_pool_spec(pool_spec)
+    if spec == "simple" and foundation_models is not None:
+        raise ArenaError("pool_spec 'simple' takes no foundation models")
     root = _checked_cache_root(sealed_cache_root)
     try:
         manifest = read_manifest(root, dataset)
         ident = cache_id(root, dataset)
     except CacheError as exc:
         raise ArenaError(str(exc)) from exc
+    foundation: tuple[FoundationCache, ...] = ()
+    if spec == "simple+foundation":
+        foundation = load_foundation_caches(dataset, ident, manifest, root, foundation_models)
     if dataset in ("etth1", "ecl"):
         series = _real_pool_series(dataset, manifest, data_root, manifest_dir)
     else:
@@ -240,6 +305,8 @@ def load_sealed_pool(
         cache_id=ident,
         manifest=manifest,
         series=series,
+        pool_spec=spec,
+        foundation=foundation,
     )
 
 
@@ -398,13 +465,20 @@ def _sealed_file_values(
 
 
 def _checked_cache_root(sealed_cache_root: Path) -> Path:
-    """Return ``sealed_cache_root`` unless its last component names the public cache."""
+    """Return ``sealed_cache_root`` unless it is or sits under a public cache root.
+
+    Any path component named ``cache_store`` or ``foundation_cache`` marks
+    the root as the public simple-cache or public foundation-cache root, or a
+    directory inside one; both hold public data only, so the sealed cache
+    must live somewhere no public tool reads.
+    """
     root = Path(sealed_cache_root)
-    if root.name == "cache_store":
-        raise ArenaError(
-            f"{root}: this looks like the public cache root; the sealed cache must live in a "
-            "directory no public tool reads"
-        )
+    for part in root.parts:
+        if part in _PUBLIC_ROOT_NAMES:
+            raise ArenaError(
+                f"{root}: this path is or sits under a public cache root ({part}); the sealed "
+                "cache must live in a directory no public tool reads"
+            )
     return root
 
 

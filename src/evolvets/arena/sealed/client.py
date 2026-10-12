@@ -33,13 +33,25 @@ _SEED_LIMIT = 2**63
 
 @dataclasses.dataclass(frozen=True)
 class SealedRequest:
-    """One sealed evaluation: which updater to replay over which sealed pool."""
+    """One sealed evaluation: which updater to replay over which sealed pool.
+
+    ``pool_spec`` picks the pool's experts — ``"simple"`` (the default, the
+    five statistical experts) or ``"simple+foundation"`` (those five plus the
+    sealed foundation caches, TASK_009 PR D) — and ``foundation_models``
+    names the foundation models to join (``None``: the pinned registry
+    entries; tests name the fake). The membership of either is the server's
+    to check: this module deliberately imports nothing that can read a cache
+    (the client-import test pins that), so a spec the arena refuses surfaces
+    as a server failure naming the log.
+    """
 
     dataset: str  # one of SEALED_DATASETS
     updater_id: str  # non-empty; recorded as Baseline.updater_id
     updater_ref: str  # "package.module:attr"; attr is a zero-argument factory returning an Updater
     config: dict[str, ConfigValue]  # recorded as Baseline.hyperparams
     seed: int
+    pool_spec: str = "simple"  # "simple" | "simple+foundation" (arena.pool.POOL_SPECS)
+    foundation_models: tuple[str, ...] | None = None  # None: the pinned registry models
 
 
 @dataclasses.dataclass(frozen=True)
@@ -143,6 +155,12 @@ def _validate(request: SealedRequest, *, run_id: str, series_timeout_seconds: fl
         raise SealedError(f"seed must be an int, got {request.seed!r}")
     if request.seed < 0 or request.seed >= _SEED_LIMIT:
         raise SealedError(f"seed must be in [0, {_SEED_LIMIT}), got {request.seed}")
+    if not isinstance(request.pool_spec, str) or not request.pool_spec:
+        raise SealedError(f"pool_spec must be a non-empty str, got {request.pool_spec!r}")
+    if request.foundation_models is not None:
+        for name in request.foundation_models:
+            if not isinstance(name, str) or not name:
+                raise SealedError(f"foundation_models must be non-empty model names, got {name!r}")
     if isinstance(series_timeout_seconds, bool) or not isinstance(
         series_timeout_seconds, (int, float)
     ):
@@ -166,6 +184,10 @@ def _request_json(request: SealedRequest) -> bytes:
             "updater_ref": request.updater_ref,
             "config": dict(request.config),
             "seed": request.seed,
+            "pool_spec": request.pool_spec,
+            "foundation_models": (
+                list(request.foundation_models) if request.foundation_models is not None else None
+            ),
         }
     ).encode("utf-8")
 

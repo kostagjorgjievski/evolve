@@ -1,10 +1,20 @@
 # Self-hosted GitHub Actions runner with GPU access, for the shared lab node.
 # Job code runs inside this container as an unprivileged user, so it cannot
 # see the host's home directories. GPUs come in through --gpus.
-FROM nvidia/cuda:12.4.1-base-ubuntu22.04
+#
+# Docker Hub is often unreachable from campus networks in China, so the base
+# image and the apt mirror are build arguments, e.g.
+#   --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda:12.4.1-base-ubuntu22.04
+#   --build-arg APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+ARG BASE_IMAGE=nvidia/cuda:12.4.1-base-ubuntu22.04
+FROM ${BASE_IMAGE}
 
+ARG APT_MIRROR=
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN if [ -n "$APT_MIRROR" ]; then \
+        sed -i "s#http://archive.ubuntu.com#http://${APT_MIRROR}#g; s#http://security.ubuntu.com#http://${APT_MIRROR}#g" /etc/apt/sources.list; \
+    fi \
+    && apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git jq tar gzip xz-utils python3 \
     && rm -rf /var/lib/apt/lists/*
 

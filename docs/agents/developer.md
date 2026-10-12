@@ -28,7 +28,7 @@ Then exit.
 ## 3. Fixing CI or answering review
 
 1. Check out the PR branch and rebase it on `origin/main` if `main` has moved.
-2. For CI failures, reproduce locally with the same commands as `.github/workflows/ci.yml` (`uv sync --locked --all-groups`, ruff, ruff format, mypy, lint-imports, pytest). Fix the cause; never weaken a check.
+2. For CI failures, reproduce locally with the same commands as `.github/workflows/ci.yml` (`uv sync --locked --group dev`, ruff, ruff format, mypy, lint-imports, pytest). Fix the cause; never weaken a check.
 3. For review comments, address every blocking item. Non-blocking items: fix them if cheap, otherwise say why not.
 4. Run the full check suite locally before pushing. Push with `git push --force-with-lease` only on your own PR branch.
 5. Post **one** reply on the PR that answers each review item by number, names the fixing commit, and ends with the line `<!-- agent:ready-for-review sha=<new head sha> -->`.

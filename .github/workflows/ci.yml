@@ -19,7 +19,7 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
       - name: Install
-        run: uv sync --locked --all-groups
+        run: uv sync --locked --group dev  # never the fm-* GPU groups (TASK_009)
       - name: Ruff lint
         run: uv run ruff check .
       - name: Ruff format check
@@ -33,6 +33,8 @@ jobs:
           bash .github/scripts/import-probe.sh 'import evolvets.arena.sealed' \
             'Agent-editable packages never reach sealed or live data'
           bash .github/scripts/import-probe.sh 'import evolvets.cache' \
+            'Agent-editable packages never reach targets, oracles or raw forecasts'
+          bash .github/scripts/import-probe.sh 'import evolvets.foundation' \
             'Agent-editable packages never reach targets, oracles or raw forecasts'
           bash .github/scripts/import-probe.sh 'import evolvets.arena.replay' \
             'Updaters see data only through the replay loop'

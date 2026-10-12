@@ -35,9 +35,25 @@ Get a registration token from GitHub: repo Settings → Actions → Runners → 
 docker run -d --name evolve-gpu-runner --restart unless-stopped \
   --gpus all \
   -e RUNNER_TOKEN=<token> \
+  -e UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+  -e HF_ENDPOINT=https://hf-mirror.com \
   -v evolve-runner:/home/runner/actions-runner \
+  -v evolve-data:/data \
   evolve-gpu-runner
 docker logs -f evolve-gpu-runner   # wait for "Listening for Jobs", then Ctrl-C
+```
+
+`evolve-data` holds model weights, uv's package cache and built forecast caches, so they survive rebuilds. The two mirror variables are passed on to every job (drop them outside China).
+
+### Updating the image later
+
+The registration lives in the `evolve-runner` volume, so no new token is needed:
+
+```bash
+cd ~/projects/evolve && git pull
+docker build -t evolve-gpu-runner <same --build-arg flags as in step 2> scripts/gpu-runner
+docker rm -f evolve-gpu-runner
+docker run ...   # the step 3 command, without -e RUNNER_TOKEN
 ```
 
 The registration is stored in the `evolve-runner` volume, so restarts and reboots don't need a new token. `--restart unless-stopped` brings it back after a reboot.

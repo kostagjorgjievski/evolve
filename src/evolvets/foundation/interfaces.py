@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from array import array
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
+
+from evolvets.foundation.errors import FoundationError
+from evolvets.foundation.registry import ModelSpec
 
 #: The quantile levels every adapter must return, in order. The 0.5 quantile
 #: (index 4) is the point forecast the updaters receive.
@@ -38,3 +42,97 @@ class SeriesForecast:
 
     values: tuple[tuple[tuple[float, ...], ...], ...]
     sorted_steps: int
+
+
+@dataclass(frozen=True)
+class FoundationSeriesEntry:
+    """Where one cached foundation series' forecasts live and what they were built from."""
+
+    series_id: str
+    length: int
+    period: int
+    first_origin: int
+    n_origins: int  # length - first_origin
+    file: str  # "series/<index:04d>.f64"
+    sha256: str  # of the file bytes
+    values_sha256: str  # sha256_hex(canonical_bytes(list(values)))
+    sorted_steps: int  # (origin, step) pairs the builder monotone-sorted
+
+
+@dataclass(frozen=True)
+class FoundationManifest:
+    """Everything a reader needs to check a foundation cache before trusting its forecasts.
+
+    ``source`` is copied from :func:`evolvets.cache.datasets.public_inputs`;
+    ``model`` is the spec the forecasts were computed with; ``device``,
+    ``dtype`` and ``library_versions`` record how the adapter that produced
+    them was equipped; ``simple_cache_id`` ties the cache to the simple cache
+    it joins origin for origin. GPU forecasts are not bit-reproducible, so a
+    cache's reproducibility unit is its cache id (the manifest hash) plus the
+    hash-verified files — never a recomputation.
+    """
+
+    foundation_cache_version: str
+    dataset: str
+    source: dict[str, str]
+    horizon: int
+    quantiles: tuple[float, ...]
+    model: ModelSpec
+    library_versions: dict[str, str]
+    device: str
+    dtype: str
+    batch_size: int
+    build_seconds: float
+    simple_cache_id: str
+    series: tuple[FoundationSeriesEntry, ...]
+
+
+@dataclass(frozen=True)
+class FoundationSeries:
+    """One cached foundation series: nine quantile forecasts for every origin.
+
+    ``data`` is flat ``[origin][quantile][h]``, origin-major, exactly as
+    stored in the series file; ``origin_index`` counts origins from
+    ``first_origin``, so origin ``t`` is index ``t - first_origin``. The
+    array is never mutated.
+    """
+
+    series_id: str
+    first_origin: int
+    horizon: int
+    data: array[float]  # n_origins * len(QUANTILES) * horizon little-endian float64
+    sorted_steps: int
+
+    @property
+    def n_origins(self) -> int:
+        """Return the number of origins the series holds forecasts for."""
+        return len(self.data) // (len(QUANTILES) * self.horizon)
+
+    @property
+    def last_origin(self) -> int:
+        """Return the last origin with a forecast: ``first_origin + n_origins - 1``."""
+        return self.first_origin + self.n_origins - 1
+
+    def row(self, origin_index: int) -> tuple[tuple[float, ...], ...]:
+        """Return ``[quantile][h]`` for origin ``first_origin + origin_index``."""
+        start = self._element(origin_index, 0)
+        return tuple(
+            tuple(self.data[start + q * self.horizon : start + (q + 1) * self.horizon])
+            for q in range(len(QUANTILES))
+        )
+
+    def point(self, origin_index: int) -> tuple[float, ...]:
+        """Return the 0.5-quantile row (index 4) for origin ``first_origin + origin_index``."""
+        start = self._element(origin_index, QUANTILES.index(0.5))
+        return tuple(self.data[start : start + self.horizon])
+
+    def _element(self, origin_index: int, quantile: int) -> int:
+        """Validate ``origin_index`` and return the flat offset of (origin, quantile, step 1)."""
+        if isinstance(origin_index, bool) or not isinstance(origin_index, int):
+            raise FoundationError(f"origin_index must be an int, got {origin_index!r}")
+        if not 0 <= origin_index < self.n_origins:
+            raise FoundationError(
+                f"origin_index {origin_index} is outside [0, {self.n_origins - 1}] "
+                f"for series {self.series_id!r}"
+            )
+        return (origin_index * len(QUANTILES) + quantile) * self.horizon

@@ -2,6 +2,7 @@
 data/*
 !data/manifests/
 cache_store/
+foundation_cache/
 ledgers/
 runs/
 

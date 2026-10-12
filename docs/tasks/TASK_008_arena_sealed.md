@@ -115,13 +115,18 @@ class SyntheticSealedManifest:
 
 def salt_path(data_root: Path) -> Path: ...  # <data_root>/sealed/synthetic.salt
 def synthetic_manifest_path(manifest_dir: Path) -> Path: ...  # <manifest_dir>/synthetic-sealed.yaml
-def init_salt(data_root: Path, manifest_dir: Path, per_family: int) -> str: ...  # returns salt sha256
+def init_salt(
+    data_root: Path, manifest_dir: Path, per_family: int
+) -> str: ...  # returns salt sha256
 def read_synthetic_manifest(manifest_dir: Path) -> SyntheticSealedManifest: ...
 def sealed_inputs(
     dataset: str, data_root: Path, manifest_dir: Path, horizon: int
 ) -> tuple[dict[str, str], tuple[SeriesInput, ...]]: ...
 def build_sealed_cache(
-    dataset: str, data_root: Path, manifest_dir: Path, sealed_cache_root: Path,
+    dataset: str,
+    data_root: Path,
+    manifest_dir: Path,
+    sealed_cache_root: Path,
     horizon: int = DEFAULT_HORIZON,
 ) -> CacheManifest: ...
 def load_sealed_pool(

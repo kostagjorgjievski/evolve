@@ -11,8 +11,8 @@ import pytest
 import evolvets.ledger.store as store_module
 from evolvets.ledger.blobs import BlobStore
 from evolvets.ledger.canonical import canonical_json
-from evolvets.ledger.payloads import Commitment
-from evolvets.ledger.schema import make_record
+from evolvets.ledger.payloads import Baseline, Commitment
+from evolvets.ledger.schema import Budget, make_record
 from evolvets.ledger.store import (
     LedgerCorruptError,
     LedgerLockedError,
@@ -20,6 +20,7 @@ from evolvets.ledger.store import (
     LedgerWriter,
     VerifyResult,
 )
+from evolvets.ledger.validate import validate_run
 
 RUN_ID = "run-001"
 
@@ -235,6 +236,39 @@ def test_put_repair_restores_full_verification(root, run_start):
     result = LedgerReader(root, RUN_ID).verify(check_blobs=True)
     assert result.ok
     assert result.records == 1
+
+
+def test_sealed_timeout_baseline_round_trip(root, run_start):
+    """A sealed-stream timeout baseline and its detail blob verify cleanly."""
+    store = BlobStore(root / RUN_ID / "blobs")
+    store.put(b"config")
+    detail = b'{"updater_ref": "toys:equal_weights", "series_timeout_seconds": 600.0}'
+    ref = store.put(detail)
+    baseline = Baseline(
+        updater_id="hedge",
+        hyperparams={"learning_rate": 0.05},
+        pool="sealed",
+        status="timeout",
+        metrics={},
+        per_task_blob=ref,
+        error="series etth1/HUFL exceeded 600.0s at step 3",
+    )
+    with LedgerWriter(root, RUN_ID, "main") as writer:
+        writer.append("run_start", run_start)
+    with LedgerWriter(root, RUN_ID, "sealed") as writer:
+        writer.append("baseline", baseline, budget=Budget(wall_seconds=1.2, evaluations=1))
+    reader = LedgerReader(root, RUN_ID)
+    records = list(reader.records())
+    assert [record.kind for record in records] == ["run_start", "baseline"]
+    assert records[1].stream == "sealed"
+    assert records[1].payload == baseline
+    assert reader.verify(check_blobs=True).ok
+    digest = ref[len("sha256:") :]
+    (root / RUN_ID / "blobs" / digest[:2] / digest).unlink()
+    result = reader.verify(check_blobs=True)
+    assert not result.ok
+    assert "blob check failed" in result.reason
+    assert validate_run(records) == []
 
 
 def _make_dead_pid():

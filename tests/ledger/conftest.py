@@ -126,7 +126,10 @@ def baseline():
         updater_id="hedge",
         hyperparams={"learning_rate": 0.05, "share": 0.1},
         pool="dev",
+        status="ok",
         metrics={"mase": 0.81},
+        per_task_blob=None,
+        error=None,
     )
 
 

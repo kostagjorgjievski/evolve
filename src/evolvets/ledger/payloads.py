@@ -314,18 +314,32 @@ class Acceptance:
 
 @dataclasses.dataclass(frozen=True)
 class Baseline:
-    """A hand-designed updater's score in one pool."""
+    """A hand-designed updater's score in one pool, or why it has none."""
 
     updater_id: str
     hyperparams: dict[str, Any]
     pool: str
-    metrics: dict[str, float]
+    status: str  # one of EVALUATION_STATUSES
+    metrics: dict[str, float]  # {} unless status == "ok"
+    per_task_blob: str | None
+    error: str | None  # None iff status == "ok"
 
     def __post_init__(self) -> None:
         _require_nonempty_str("updater_id", self.updater_id)
         _require_str_keys("hyperparams", self.hyperparams)
         _require_literal("pool", self.pool, EVALUATION_POOLS)
+        _require_literal("status", self.status, EVALUATION_STATUSES)
         _require_float_dict("metrics", self.metrics)
+        _require_nullable_blob_ref("per_task_blob", self.per_task_blob)
+        # A run that did not finish has no score to report, and a failure
+        # without an explanation cannot be audited; same pairing as Evaluation.
+        if self.status != "ok" and self.metrics != {}:
+            raise PayloadError("metrics must be empty when status is not 'ok'")
+        if self.status == "ok":
+            if self.error is not None:
+                raise PayloadError("error must be None when status is 'ok'")
+        elif not isinstance(self.error, str) or not self.error:
+            raise PayloadError("error must be a non-empty string when status is not 'ok'")
         _check_finite("baseline", dataclasses.asdict(self))
 
 

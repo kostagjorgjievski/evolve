@@ -10,8 +10,10 @@ Today the expert pool is five simple statistical forecasters. Adaptation (switch
 
 ## Decisions already made (do not reopen)
 
+- **Toto is dropped from this task (planner decision, 2026-10-12, issue #64).** Neither Toto generation installs under the pins: every `toto-ts` release pins `torch==2.7.0`, and `toto-2` needs Python >= 3.12. The task's own fallback applies (leave it out), and the pins stay as they are. The foundation pool is **four models**: Chronos-2, TiRex, Moirai 2.0, TimesFM 2.5. The `toto` placeholder stays in the registry with `hf_revision = "unpinned"` and is **excluded from every built set and from the `simple+foundation` pool**: a model is in the pool only if its `hf_revision` is a pinned commit hash. There is no C3. Toto 2.0 (native quantiles, Apache-2.0) is a possible later addition if the project moves to Python 3.12; that is a human decision and a separate roadmap entry.
+
 - **Approval (owner, 2026-10-12):** heavy dependencies and the GPU are approved for this task: PyTorch, numpy, and the five model libraries named below, each in its own optional dependency group. This approval covers only what this file names.
-- **Models** (one adapter each, in this order): Chronos-2 (Amazon), TiRex (NX-AI), Toto (Datadog), Moirai 2.0 (Salesforce), TimesFM 2.5 (Google). Before PR C, verify on each official model card or repository the Hugging Face model id, the pip package name, the license, and which pretraining corpora are published. Record them in the registry (PR A). Never guess a value: write `"unknown"` and say so in the PR.
+- **Models** (one adapter each, in this order): Chronos-2 (Amazon), TiRex (NX-AI), Moirai 2.0 (Salesforce), TimesFM 2.5 (Google). (Toto was planned and dropped; see the first decision.) Before PR C, verify on each official model card or repository the Hugging Face model id, the pip package name, the license, and which pretraining corpora are published. Record them in the registry (PR A). Never guess a value: write `"unknown"` and say so in the PR.
 - **Torch is pinned to `torch==2.6.*`.** Its PyPI Linux wheel bundles CUDA 12.4, which matches the lab GPU driver (550). The GPU smoke test (#50) verified exactly this. If a model library cannot run on torch 2.6, leave that model out of PR C and open a `needs-human` issue. Do not raise the pin, vendor the library, or install it from a git URL.
 - **Cached, not live.** Foundation models never run inside the replay loop, an updater, or any agent-editable package. They run only in the cache builder, as an offline GPU job. The cache is the reproducible artefact: the same reasoning as TASK_006, with "bit-exact recomputation" replaced by "built once, content-hashed, verified by hash" (below).
 - **Univariate, point and quantiles.** Each series is forecast on its own past values only: no covariates, no cross-series context, no timestamps. Each forecast stores nine quantiles (0.1 … 0.9). The point forecast used by updaters is the 0.5 quantile.
@@ -187,7 +189,7 @@ Dependencies: none. Size: ~400 lines. If it grows, split the CLI and `compare_re
 
 ---
 
-## PR C: five real adapters, one model per PR (C1 to C5)
+## PR C: four real adapters, one model per PR (C1, C2, C4, C5; there is no C3)
 
 **Why split (decided after two developer runs hit the 60-minute limit on the unsplit version):** each run must finish in well under an hour. C1 builds the shared machinery and the first model. C2 to C5 add one model each and follow C1's pattern exactly. Open them in this order and stop after each one for review: `feat/foundation-models-chronos2` (C1), `feat/foundation-models-tirex` (C2), `feat/foundation-models-toto` (C3), `feat/foundation-models-moirai2` (C4), `feat/foundation-models-timesfm25` (C5).
 
@@ -228,9 +230,9 @@ Tests for C1 (all required; `tests/foundation/test_models.py`):
 
 Size: ~300 lines. Dependencies: the `fm-chronos` group only.
 
-### C2 to C5: one model each
+### C2, C4, C5: one model each
 
-Each of `tirex` (group `fm-tirex`), `toto` (`fm-toto`), `moirai2` (`fm-moirai`) and `timesfm25` (`fm-timesfm`) adds: its dependency group (and `uv.lock`), `foundation/models/<name>.py`, its filled-in registry entry, and the same four tests as C1 tests 1 to 4 for that model. Nothing else changes. If the model's library needs a different torch pin, stop and open a `needs-human` issue instead of changing the pin. Size: ~120 lines each.
+C2 (`tirex`, group `fm-tirex`) is merged. C4 (`feat/foundation-models-moirai2`: `moirai2`, group `fm-moirai`) and C5 (`feat/foundation-models-timesfm25`: `timesfm25`, group `fm-timesfm`) each add: the dependency group (and `uv.lock`), `foundation/models/<name>.py`, the filled-in registry entry, and the same four tests as C1 tests 1 to 4 for that model. Nothing else changes, except that **C4 also updates the registry comment** to say that `toto` is intentionally unbuilt (see the first decision) and adds a test that the built set (models with a pinned `hf_revision`) is exactly the models whose adapters exist. If a model's library needs a different torch pin or Python version, stop and open a `needs-human` issue instead of changing either. Size: ~120 lines each.
 
 **After C1 merges and Chronos-2 passes the GPU smoke test**, the human adds the GPU workflow `gpu-foundation-cache.yml` (see below) so a first cache can be built while C2 to C5 are written. C5 changes this file's first-line status only if PR D is already done; otherwise the last PR of the whole task does.
 
@@ -244,7 +246,7 @@ Let the arena replay a pool of the five simple experts plus the cached foundatio
 
 ### Behaviour
 
-- A **pool spec** names the experts a replay uses: `"simple"` (the five, as now) or `"simple+foundation"` (the five, then the foundation models in registry order). It is part of the run config and is recorded in the run's `run_start` config, alongside the simple and foundation cache ids.
+- A **pool spec** names the experts a replay uses: `"simple"` (the five, as now) or `"simple+foundation"` (the five, then the pinned foundation models in registry order). It is part of the run config and is recorded in the run's `run_start` config, alongside the simple and foundation cache ids.
 - `arena/dev.py` loads the foundation caches for the dataset, checks that each manifest's `simple_cache_id` equals the simple cache in use, and joins the forecasts row for row. Updaters receive the point forecast (0.5 quantile). `Context.expert_names` lists every expert in the pool.
 - **Sealed:** add `evolvets sealed build-foundation-cache --model M`. It builds a sealed pool's foundation cache under the sealed cache root, from inside the arena's sealed code path, with the same adapter and builder. The sealed server loads it the same way as dev. The sealed CLI refuses any root under `cache_store/` or `foundation_cache/`.
 - Bump `ARENA_VERSION` to `"2"`. Replays with pool spec `"simple"` must give results identical to version 1 (a golden test pins this). A run records the pool spec, so Gate 1 can report headroom with both pools.

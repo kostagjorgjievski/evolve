@@ -51,3 +51,14 @@ The registration is stored in the `evolve-runner` volume, so restarts and reboot
 ## How free GPUs are detected inside the container
 
 `gpu-pick.sh` uses `nvidia-smi` memory use and utilization, which reflect every process on the host, including other users'. A container can't see the PIDs of host processes, so the memory and utilization thresholds do the work. A GPU anyone is using shows memory well above the 1 GiB threshold. Per-GPU locks prevent two EvolveTS jobs from sharing a card.
+
+## If jobs can't download the code
+
+GPU workflows fetch the repo with a quick `git fetch` and fall back to a tarball from `api.github.com` (which redirects to `codeload.github.com`). If both time out, check from inside the container:
+
+```bash
+docker exec evolve-gpu-runner curl -sI -m 15 https://github.com | head -1
+docker exec evolve-gpu-runner curl -sI -m 15 https://codeload.github.com | head -1
+```
+
+If these fail but the same `curl` works on sp-1 itself, recreate the container with the host's network by adding `--network host` to the `docker run` above (the registration in the `evolve-runner` volume is kept). If the lab has an HTTP proxy, add `-e https_proxy=http://<proxy>:<port> -e no_proxy=localhost,127.0.0.1` instead; the runner passes it on to every job.

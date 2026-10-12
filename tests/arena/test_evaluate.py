@@ -249,6 +249,9 @@ RESULT_KEYS = {
     "dataset",
     "cache_id",
     "arena_version",
+    "pool_spec",
+    "foundation_cache_ids",
+    "leakage_risk",
     "status",
     "error",
     "failed_series",
@@ -287,12 +290,15 @@ def test_golden_synthetic_equal_weights(synthetic_pool) -> None:
 
     Changing this digest means some cached forecast, weight handling or metric
     value changed: bump ARENA_VERSION (or EXPERTS_VERSION / GENERATOR_VERSION
-    when those are what changed) and repin the digest.
+    when those are what changed) and repin the digest. Arena version 2
+    repinned it once: the result object gained ``pool_spec``,
+    ``foundation_cache_ids`` and ``leakage_risk``, which the digest covers;
+    tests/arena/test_pool.py proves the numbers themselves are unchanged.
     """
     result = replay_dataset(lambda: EqualWeights(), {}, 0, synthetic_pool)  # type: ignore[arg-type]
     assert result.status == "ok"
     digest = sha256(canonical_bytes(result_to_obj(result))).hexdigest()
-    assert digest == "83327d272555e2ef812af7f6adaf50d3f6cf8aa1d877f4043b1f904977ad58b3"
+    assert digest == "a3dcc509e2a085c7ff473cdfa02c9bc434b6aa419f1975fda03a6a31b7405fd5"
 
 
 # --- Test 14: determinism and AST guards ------------------------------------------------------
@@ -304,7 +310,7 @@ def test_two_replay_dataset_calls_are_equal(synthetic_pool) -> None:
     assert a == b
 
 
-@pytest.mark.parametrize("name", ["metrics.py", "evaluate.py", "dev.py"])
+@pytest.mark.parametrize("name", ["metrics.py", "evaluate.py", "dev.py", "pool.py"])
 def test_no_float_sum_or_statistics(name: str) -> None:
     """The new arena modules never use builtin sum, math.fsum or statistics."""
     tree = ast.parse((SRC / "arena" / name).read_text(encoding="utf-8"))

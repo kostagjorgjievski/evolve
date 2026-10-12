@@ -17,6 +17,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from evolvets.arena.errors import ArenaError
+from evolvets.arena.pool import FoundationCache, check_pool_spec, load_foundation_caches
 from evolvets.arena.realdata.prepare import PrepareError, load_public
 from evolvets.arena.synthetic import GENERATOR_VERSION
 from evolvets.arena.synthetic.grammar import FAMILIES, GrammarConfig, SyntheticTask
@@ -55,22 +56,47 @@ class DevPool:
     cache_id: str
     manifest: CacheManifest
     series: tuple[DevSeries, ...]  # cache manifest order
+    pool_spec: str = "simple"  # which experts the pool replays (arena/pool.py)
+    foundation: tuple[FoundationCache, ...] = ()  # () unless pool_spec is "simple+foundation"
 
 
-def load_dev_pool(dataset: str, cache_root: Path, data_root: Path, manifest_dir: Path) -> DevPool:
+def load_dev_pool(
+    dataset: str,
+    cache_root: Path,
+    data_root: Path,
+    manifest_dir: Path,
+    *,
+    pool_spec: str = "simple",
+    foundation_root: Path | None = None,
+    foundation_models: Sequence[str] | None = None,
+) -> DevPool:
     """Load the dev pool for ``dataset`` from its cache and its public data.
 
-    Every failure — an unknown dataset, a missing or tampered cache, missing
-    or tampered public data — surfaces as :class:`ArenaError`, so no caller
-    needs to know the cache's and the real-data layer's own error types.
+    With ``pool_spec="simple+foundation"`` the foundation caches under
+    ``foundation_root`` are loaded and joined onto the simple cache (the
+    pinned registry models by default, ``foundation_models`` to name others,
+    as tests name the fake). Every failure — an unknown dataset, a missing
+    or tampered cache, missing or tampered public data, a foundation cache
+    that does not join — surfaces as :class:`ArenaError`, so no caller needs
+    to know the cache's and the real-data layer's own error types.
     """
     if dataset not in CACHE_DATASETS:
         raise ArenaError(f"unknown dataset {dataset!r}; expected one of {list(CACHE_DATASETS)}")
+    spec = check_pool_spec(pool_spec)
+    if spec == "simple" and (foundation_root is not None or foundation_models is not None):
+        raise ArenaError("pool_spec 'simple' takes no foundation caches")
     try:
         manifest = read_manifest(cache_root, dataset)
         ident = cache_id(cache_root, dataset)
     except CacheError as exc:
         raise ArenaError(str(exc)) from exc
+    foundation: tuple[FoundationCache, ...] = ()
+    if spec == "simple+foundation":
+        if foundation_root is None:
+            raise ArenaError("pool_spec 'simple+foundation' needs a foundation cache root")
+        foundation = load_foundation_caches(
+            dataset, ident, manifest, foundation_root, foundation_models
+        )
     if dataset in ("etth1", "ecl"):
         series = _real_series(dataset, manifest, data_root, manifest_dir)
     else:
@@ -81,6 +107,8 @@ def load_dev_pool(dataset: str, cache_root: Path, data_root: Path, manifest_dir:
         cache_id=ident,
         manifest=manifest,
         series=series,
+        pool_spec=spec,
+        foundation=foundation,
     )
 
 

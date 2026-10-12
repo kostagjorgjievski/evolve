@@ -36,6 +36,15 @@ fm-tirex = [
     "tirex-ts>=1.4,<2",
     "torch==2.6.*",
 ]
+# TASK_009 PR C5: timesfm >= 3.0 is the first PyPI line with the TimesFM 2.5
+# classes (the model card's "pip install from PyPI coming soon" note predates
+# it). Its base install keeps torch as an extra (torch>=2.0) and pulls only
+# numpy, huggingface-hub and safetensors, so the pinned torch resolves
+# cleanly with no extra pins.
+fm-timesfm = [
+    "timesfm>=3.0,<4",
+    "torch==2.6.*",
+]
 
 [build-system]
 requires = ["hatchling"]

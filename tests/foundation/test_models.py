@@ -1,4 +1,4 @@
-"""Model-adapter tests for TASK_009 PR C1/C2: load_adapter, the model pins, smoke.
+"""Model-adapter tests for TASK_009 PR C1/C2/C5: load_adapter, the model pins, smoke.
 
 The real-model tests need the library and model weights: they carry the
 ``foundation`` marker, skip without the library (``importorskip``) and run in
@@ -24,7 +24,7 @@ from evolvets.foundation.errors import FoundationError
 from evolvets.foundation.fake import FAKE_SPEC
 from evolvets.foundation.interfaces import QUANTILES
 from evolvets.foundation.models import load_adapter
-from evolvets.foundation.registry import get_spec
+from evolvets.foundation.registry import MODELS, get_spec
 from evolvets.foundation.smoke import run_smoke
 from evolvets.runner import cli
 
@@ -37,6 +37,11 @@ _needs_library_absent = pytest.mark.skipif(
 _needs_tirex_absent = pytest.mark.skipif(
     importlib.util.find_spec("tirex") is not None,
     reason="behaviour under test needs tirex absent (fm-tirex installs it)",
+)
+#: The same for timesfm; the fm-timesfm group installs the library.
+_needs_timesfm_absent = pytest.mark.skipif(
+    importlib.util.find_spec("timesfm") is not None,
+    reason="behaviour under test needs timesfm absent (fm-timesfm installs it)",
 )
 
 
@@ -56,8 +61,12 @@ def test_chronos2_entry_is_pinned() -> None:
 
 
 def test_other_models_remain_unpinned_placeholders() -> None:
-    """C1 and C2 fill in chronos2 and tirex; the rest arrive with their own PRs (C3 to C5)."""
-    for name in ("toto", "moirai2", "timesfm25"):
+    """C1, C2 and C5 fill in chronos2, tirex and timesfm25; toto and moirai2 stay placeholders.
+
+    TASK_009 dropped those two over the torch and Python pins (issues #64 and
+    #66); their entries are kept for the record, permanently unpinned.
+    """
+    for name in ("toto", "moirai2"):
         spec = get_spec(name)
         assert spec.hf_revision == "unpinned"
         assert spec.quantile_method == "unknown"
@@ -76,6 +85,97 @@ def test_tirex_entry_is_pinned() -> None:
     assert spec.quantile_method == "native"
     assert spec.license  # "nx-ai-community-license", read from the model card
     assert spec.overlap_source.startswith(("http://", "https://"))
+
+
+# --- C5 test 1: the timesfm25 registry entry is verified and pinned ----------------------
+
+
+def test_timesfm25_entry_is_pinned() -> None:
+    """hf_revision is a 40-hex commit hash; max_context, license and overlap_source are set."""
+    spec = get_spec("timesfm25")
+    assert spec.hf_model_id == "google/timesfm-2.5-200m-pytorch"
+    assert re.fullmatch(r"[0-9a-f]{40}", spec.hf_revision)
+    assert spec.hf_revision != "unpinned"
+    assert spec.max_context == 4096  # the checkpoint config's 16384, capped by TASK_009
+    assert spec.quantile_method == "native"
+    assert spec.license  # "apache-2.0", read from the model card
+    assert spec.overlap_source.startswith(("http://", "https://"))
+
+
+# --- C5 test 2: the real smoke check (library and weights; GPU workflow) -----------------
+
+
+@pytest.mark.foundation
+def test_timesfm25_smoke_passes_on_cpu() -> None:
+    """The smoke check passes with the real adapter on CPU, a context of 64.
+
+    TimesFM bakes its compiled ForecastConfig (context padding, horizon,
+    batching) in at ``make_adapter`` time, so — unlike C1/C2, whose adapters
+    replaced the spec after loading — the smaller smoke context must be in
+    the spec handed to ``make_adapter`` itself. Every ``run_smoke`` check
+    (shapes, finiteness, batch invariance, MAE beats naive) runs unchanged.
+    """
+    pytest.importorskip("timesfm")
+    from evolvets.foundation.models.timesfm25 import make_adapter
+
+    spec = dataclasses.replace(get_spec("timesfm25"), max_context=64)
+    adapter = make_adapter(spec, "cpu")
+    report = run_smoke(spec, adapter)
+    assert report.ok, report.problems
+    assert report.device == "cpu"
+    assert report.n_origins == 20
+    assert report.max_rel_batch_diff <= 1e-3
+
+
+# --- C5 test 3: build names the missing dependency group (plain CI) ----------------------
+
+
+@_needs_timesfm_absent
+def test_build_without_timesfm_library_names_the_group(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """build --model timesfm25 with the library absent exits nonzero naming fm-timesfm."""
+    argv = [
+        "foundation",
+        "build",
+        "--dataset",
+        "etth1",
+        "--model",
+        "timesfm25",
+        "--root",
+        str(tmp_path / "foundation_cache"),
+        "--cache-root",
+        str(tmp_path / "cache_store"),
+        "--data-root",
+        str(tmp_path / "data"),
+        "--manifest-dir",
+        str(tmp_path / "manifests"),
+    ]
+    assert cli.main(argv) == 1
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 1 and out[0].startswith("FAIL etth1/timesfm25: ")
+    assert "fm-timesfm" in out[0]
+    assert not (tmp_path / "foundation_cache").exists()
+
+
+# --- C5 closing deliverable: the built set is exactly the adapted models -----------------
+
+
+def test_built_set_is_exactly_the_adapted_models() -> None:
+    """The pinned models are exactly those with adapter modules: chronos2, tirex, timesfm25.
+
+    A model is in the pool only if its ``hf_revision`` is a pinned commit hash
+    (TASK_009's rule), and every such model must have an adapter module in
+    this checkout; toto and moirai2 are neither pinned nor adapted (issues
+    #64 and #66).
+    """
+    built = {name for name, spec in MODELS.items() if spec.hf_revision != "unpinned"}
+    adapted = {
+        name
+        for name in MODELS
+        if importlib.util.find_spec(f"evolvets.foundation.models.{name}") is not None
+    }
+    assert built == adapted == {"chronos2", "tirex", "timesfm25"}
 
 
 # --- C2 test 2: the real smoke check (library and weights; GPU workflow) -----------------
@@ -189,7 +289,7 @@ def test_import_models_without_torch() -> None:
     code = (
         "import sys; "
         "import evolvets.foundation.models, evolvets.foundation.models.chronos2, "
-        "evolvets.foundation.models.tirex; "
+        "evolvets.foundation.models.tirex, evolvets.foundation.models.timesfm25; "
         "assert 'torch' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True)
@@ -204,9 +304,9 @@ def test_load_adapter_unknown_name() -> None:
         load_adapter("nope", "cpu")
 
 
-def test_load_adapter_module_not_yet_added() -> None:
-    """A registered model whose adapter module is absent says which PR brings it."""
-    with pytest.raises(FoundationError, match="arrives with TASK_009 PR C"):
+def test_load_adapter_module_never_arriving() -> None:
+    """A dropped model's missing adapter module is reported as permanent, not as PR C work."""
+    with pytest.raises(FoundationError, match="none is planned"):
         load_adapter("toto", "cpu")
 
 

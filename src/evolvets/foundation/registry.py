@@ -6,8 +6,8 @@ documentation. Where a fact could not be verified it is the literal string
 ``"unknown"`` (TASK_009: never guess a value). PR C pins each model's
 ``hf_revision`` to a commit hash, verifies ``max_context`` from the model
 card (capped at 4096) and fills ``quantile_method`` from what the library
-actually returns; a model still waiting for its PR keeps its PR A
-placeholder entry, with ``hf_revision = "unpinned"``.
+actually returns; a model whose PR was dropped keeps its PR A placeholder
+entry, with ``hf_revision = "unpinned"``, for the record.
 """
 
 from dataclasses import dataclass
@@ -90,6 +90,15 @@ MODELS: dict[str, ModelSpec] = {
         pretraining_overlap={"etth1": "unknown", "ecl": "yes"},
         overlap_source="https://huggingface.co/datasets/autogluon/chronos_datasets",
     ),
+    # Intentionally unbuilt (TASK_009 PR C5 closing note): toto and moirai2
+    # keep placeholder entries forever — a model is built only if its
+    # hf_revision is a pinned commit hash. Toto was dropped because neither
+    # release generation installs under the pins (every toto-ts release pins
+    # torch==2.7.0; toto-2 needs Python >= 3.12; planner decision 2026-10-12,
+    # issue #64) and Moirai 2.0 because every uni2ts release with Moirai 2.0
+    # support requires torch<2.5, under the cc-by-nc-4.0 license besides
+    # (planner decision 2026-10-12, issue #66). If the pins ever relax,
+    # either can return as its own roadmap entry.
     "toto": ModelSpec(
         name="toto",
         # two generations exist (1.0 "toto-ts", 2.0 "toto-models"); TASK_009 names no version
@@ -115,16 +124,34 @@ MODELS: dict[str, ModelSpec] = {
         pretraining_overlap={"etth1": "yes", "ecl": "yes"},
         overlap_source="https://huggingface.co/Salesforce/moirai-2.0-R-small",
     ),
+    # Facts verified 2026-10-12 for PR C5 (feat/foundation-models-timesfm25):
+    # model card https://huggingface.co/google/timesfm-2.5-200m-pytorch and the
+    # checkpoint's own config.json (pip "timesfm" >= 3.0, the first PyPI line
+    # with the TimesFM 2.5 classes — the card's "pip install from PyPI coming
+    # soon" note predates it; Apache-2.0; config.json's context_length 16384,
+    # capped at 4096 by TASK_009; config.json and the library's model
+    # definition both put the trained levels at 0.1 .. 0.9 = QUANTILES, which
+    # forecast returns as columns 1..9 of its quantile output, the mean in
+    # column 0), commit hash from
+    # https://huggingface.co/api/models/google/timesfm-2.5-200m-pytorch field
+    # "sha". Overlap read from the card's corpus listing: GiftEvalPretrain,
+    # Wikimedia Pageviews, Google Trends, and synthetic/augmented data. The
+    # first is published but unenumerated (its card counts "71 univariate and
+    # 17 multivariate datasets" without naming them) and the other three are
+    # provably neither ETTh1 nor ECL, so neither dataset's presence can be
+    # decided from the published sources: both stay "unknown". This corrects
+    # the PR A placeholder's "no"s, which were not provable — the same
+    # conclusion C1 and C2 reached for the same GiftEvalPretrain corpus.
     "timesfm25": ModelSpec(
         name="timesfm25",
         hf_model_id="google/timesfm-2.5-200m-pytorch",
-        hf_revision="unpinned",
+        hf_revision="1d952420fba87f3c6dee4f240de0f1a0fbc790e3",
         pip_package="timesfm",
         dependency_group="fm-timesfm",
-        max_context=0,
-        quantile_method="unknown",
+        max_context=4096,
+        quantile_method="native",
         license="apache-2.0",
-        pretraining_overlap={"etth1": "no", "ecl": "no"},
+        pretraining_overlap={"etth1": "unknown", "ecl": "unknown"},
         overlap_source="https://huggingface.co/google/timesfm-2.5-200m-pytorch",
     ),
 }

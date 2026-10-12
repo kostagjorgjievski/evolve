@@ -1,4 +1,4 @@
-"""Toy updaters for the sealed-worker tests (``tests/arena/test_sealed_worker.py``).
+"""Toy updaters for the sealed-worker and sealed-server tests.
 
 Every toy is reachable as a zero-argument factory — the class itself when its
 constructor takes no arguments, a module-level ``make_*``-style function
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -35,6 +36,42 @@ def _note(path_value: object, payload: dict[str, object]) -> int:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload) + "\n")
     return ordinal
+
+
+class EqualWeights:
+    """Equal weight on every expert at every step (the entry-10 baseline shape)."""
+
+    def init(self, n_experts: int, horizon: int, config: Any, seed: int) -> None:
+        return None
+
+    def update(self, state: Any, feedback: Any, context: Any) -> tuple[list[list[float]], None]:
+        return (equal_weights(len(context.expert_names), context.horizon), None)
+
+
+class OneHotNaive:
+    """All weight on the ``naive`` expert at every step."""
+
+    def init(self, n_experts: int, horizon: int, config: Any, seed: int) -> None:
+        return None
+
+    def update(self, state: Any, feedback: Any, context: Any) -> tuple[list[list[float]], None]:
+        rows = [
+            [1.0 if name == "naive" else 0.0] * context.horizon for name in context.expert_names
+        ]
+        return (rows, None)
+
+
+class KillServer:
+    """Kills its process's parent (the sealed server) at ``step``; notes its pid at init."""
+
+    def init(self, n_experts: int, horizon: int, config: Any, seed: int) -> None:
+        _note(config["spy_path"], {"pid": os.getpid(), "event": "init"})
+        return None
+
+    def update(self, state: Any, feedback: Any, context: Any) -> tuple[list[list[float]], None]:
+        if context.step == 5:
+            os.kill(os.getppid(), signal.SIGKILL)
+        return (equal_weights(len(context.expert_names), context.horizon), None)
 
 
 class Spy:

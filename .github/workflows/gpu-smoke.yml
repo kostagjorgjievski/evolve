@@ -20,7 +20,36 @@ jobs:
     runs-on: [self-hosted, gpu]
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      # sp-1 sits behind a campus network where git over github.com often
+      # times out, while api.github.com works. Try a quick shallow fetch and
+      # fall back to the REST tarball instead of actions/checkout's long retries.
+      - name: Get code
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          find . -mindepth 1 -delete
+          git_fetch() {
+            git init -q . &&
+            git -c "http.extraheader=AUTHORIZATION: bearer ${TOKEN}" \
+              -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+              fetch -q --depth 1 --no-tags "https://github.com/${REPO}.git" "${SHA}" &&
+            git checkout -q FETCH_HEAD
+          }
+          if timeout 60 bash -c "$(declare -f git_fetch); git_fetch"; then
+            echo "Got ${SHA} with git"
+          else
+            echo "git unavailable from $(hostname); downloading tarball via api.github.com"
+            find . -mindepth 1 -delete
+            curl -fsSL --retry 5 --retry-delay 10 --max-time 300 \
+              -H "Authorization: Bearer ${TOKEN}" \
+              "https://api.github.com/repos/${REPO}/tarball/${SHA}" \
+              | tar -xz --strip-components=1
+            echo "Got ${SHA} as tarball"
+          fi
+          test -f .github/scripts/gpu-pick.sh
       - name: Pick free GPU(s)
         run: bash .github/scripts/gpu-pick.sh "${{ inputs.gpus }}"
       - name: Show GPUs
@@ -42,4 +71,15 @@ jobs:
           EOF
       - name: Release GPU lock
         if: always()
-        run: bash .github/scripts/gpu-release.sh
+        # Works even if "Get code" failed: then no GPU was picked and there is
+        # nothing to release, so a missing script is not an error.
+        run: |
+          if [ -f .github/scripts/gpu-release.sh ]; then
+            bash .github/scripts/gpu-release.sh
+          elif [ -n "${EVOLVETS_GPU_LOCKS:-}" ]; then
+            for lock in $EVOLVETS_GPU_LOCKS; do
+              case "$lock" in */evolvets-gpu-*.lock) rm -rf "$lock" && echo "Released $lock" ;; esac
+            done
+          else
+            echo "No GPU locks held."
+          fi

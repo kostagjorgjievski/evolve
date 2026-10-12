@@ -22,6 +22,7 @@ from evolvets.arena.realdata.prepare import (
 from evolvets.arena.sealed.names import SEALED_DATASETS
 from evolvets.arena.sealed.pools import (
     build_sealed_cache,
+    build_sealed_foundation_cache,
     init_salt,
     synthetic_manifest_path,
 )
@@ -250,6 +251,39 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_HORIZON,
         help="forecast horizon to cache (default: 24)",
+    )
+    build_sealed_fm = sealed_sub.add_parser(
+        "build-foundation-cache",
+        help="compute one model's forecasts for a sealed pool, under the sealed cache root",
+    )
+    build_sealed_fm.add_argument(
+        "dataset",
+        choices=SEALED_DATASETS,
+        help="which sealed pool (one model per build; the sealed simple cache must exist)",
+    )
+    build_sealed_fm.add_argument(
+        "--model",
+        choices=_FOUNDATION_MODELS,
+        required=True,
+        help="which model ('fake' for tests and CI; real models resolve through their adapters)",
+    )
+    build_sealed_fm.add_argument("--data-root", default="data", help="data root directory")
+    build_sealed_fm.add_argument(
+        "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+    )
+    build_sealed_fm.add_argument(
+        "--sealed-cache-root",
+        default="data/sealed_cache",
+        help="sealed cache root directory (never a public cache root)",
+    )
+    build_sealed_fm.add_argument(
+        "--batch-size", type=int, default=32, help="contexts per adapter call (default: 32)"
+    )
+    build_sealed_fm.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="adapter device; auto uses CUDA when available",
     )
     return parser
 
@@ -497,6 +531,36 @@ def _cmd_sealed_build(
     return 1 if failed else 0
 
 
+def _cmd_sealed_foundation_build(
+    dataset: str,
+    model: str,
+    data_root: str,
+    manifest_dir: str,
+    sealed_cache_root: str,
+    batch_size: int,
+    device: str,
+) -> int:
+    """Build one model's sealed foundation cache; one FAIL line on any refusal."""
+    try:
+        adapter, spec = _foundation_adapter(model, device)
+        manifest = build_sealed_foundation_cache(
+            dataset,
+            adapter,
+            spec,
+            Path(data_root),
+            Path(manifest_dir),
+            Path(sealed_cache_root),
+            batch_size,
+        )
+        ident = foundation_cache_id(Path(sealed_cache_root), dataset, model)
+    except (ArenaError, FoundationError, CacheError, ValueError, OSError) as exc:
+        print(f"FAIL {dataset}/{model}: {exc}")
+        return 1
+    origins = sum(entry.n_origins for entry in manifest.series)
+    print(f"OK {dataset}/{model}: {len(manifest.series)} series, {origins} origins, cache {ident}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the EvolveTS CLI."""
     parser = build_parser()
@@ -569,6 +633,16 @@ def main(argv: list[str] | None = None) -> int:
                 args.manifest_dir,
                 args.sealed_cache_root,
                 horizon=args.horizon,
+            )
+        if args.sealed_command == "build-foundation-cache":
+            return _cmd_sealed_foundation_build(
+                args.dataset,
+                args.model,
+                args.data_root,
+                args.manifest_dir,
+                args.sealed_cache_root,
+                args.batch_size,
+                args.device,
             )
         parser.print_help()
         return 0

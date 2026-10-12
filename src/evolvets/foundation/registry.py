@@ -61,14 +61,31 @@ MODELS: dict[str, ModelSpec] = {
         pretraining_overlap={"etth1": "unknown", "ecl": "yes"},
         overlap_source="https://huggingface.co/datasets/autogluon/chronos_datasets",
     ),
+    # Facts verified 2026-10-12 for PR C2 (feat/foundation-models-tirex):
+    # model card https://huggingface.co/NX-AI/TiRex (pip "tirex-ts"; weights
+    # under license_name "nx-ai-community-license"; 35M-parameter xLSTM),
+    # commit hash from https://huggingface.co/api/models/NX-AI/TiRex field
+    # "sha". Max context 2048 from the library FAQ ("TiRex supports a maximum
+    # context length of up to 2,048"; the paper trains with a context window
+    # of 2048); the adapter validates max_context against the checkpoint's own
+    # train_ctx_len. Quantile method native: the paper trains on the levels
+    # Q = {0.1, 0.2, ..., 0.9} = QUANTILES, and the forecast API returns
+    # exactly the checkpoint's config.quantiles (asserted at load time).
+    # Overlap: the card names the same two corpora as chronos-2 —
+    # autogluon/chronos_datasets (includes "electricity_15min", the UCI
+    # ElectricityLoadDiagrams2011_2014 source, so ecl is "yes") and
+    # Salesforce/GiftEvalPretrain. ETTh is not in the chronos_datasets repo
+    # (it lives in the companion autogluon/chronos_datasets_extra, which the
+    # card does not name), and GiftEvalPretrain's card does not enumerate its
+    # datasets, so etth1 stays "unknown".
     "tirex": ModelSpec(
         name="tirex",
         hf_model_id="NX-AI/TiRex",
-        hf_revision="unpinned",
+        hf_revision="63c740922493f5fbe60b277609ec62babfba2762",
         pip_package="tirex-ts",
         dependency_group="fm-tirex",
-        max_context=0,
-        quantile_method="unknown",
+        max_context=2048,
+        quantile_method="native",
         license="nx-ai-community-license",
         pretraining_overlap={"etth1": "unknown", "ecl": "yes"},
         overlap_source="https://huggingface.co/datasets/autogluon/chronos_datasets",

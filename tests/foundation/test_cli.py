@@ -104,7 +104,7 @@ def test_unadded_model_names_arrive_with_pr_c(
 ) -> None:
     """Commands refuse a model whose adapter module is absent, naming the PR that adds it."""
     for model, argv in (
-        ("tirex", _foundation_args("verify", env, model="tirex")),
+        ("timesfm25", _foundation_args("verify", env, model="timesfm25")),
         ("toto", [*_foundation_args("compare", env, model="toto"), "--sample", "5", "--seed", "0"]),
         ("moirai2", _foundation_args("build", env, model="moirai2")),
     ):

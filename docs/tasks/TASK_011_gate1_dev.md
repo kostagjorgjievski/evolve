@@ -351,9 +351,14 @@ Fixtures: a completed tune run on the synthetic fixture (PR B, small grid), a tu
 
 None.
 
-### Size
+### Size and split (mandatory)
 
-About 350 lines of implementation. If it grows past ~400, put input loading, refusals and gap computation (tests 3, 6, 7, 8, 9) in `feat/gate1-report-data` and the Markdown rendering and CLI in `feat/gate1-report`.
+Two developer runs on the unsplit PR C hit the 60-minute limit with no output (issue discussion in the planner log, 2026-10-13). PR C is therefore split in two PRs, opened in order, each stopping for review:
+
+- **PR C1, `feat/gate1-report-data`:** `src/evolvets/runner/gate1_report_data.py`. It does everything in "Exact behaviour: inputs and refusals" and computes every number in "Exact behaviour: content" as plain dataclasses (`ReportData`: run rows, protocol versions, per `(dataset, pool_spec)` the tuned-baseline rows, oracle rows, gap rows with bootstrap intervals, per-family gap rows, leakage flag, max `series_wall_seconds`). It renders no Markdown and touches no CLI. Tests: 2 (as dataclass fields), 3, 6, 7, 8 (except the CLI/`--out` parts), 9, and the import guard of test 13.
+- **PR C2, `feat/gate1-report`:** `src/evolvets/runner/gate1_report.py` (`build_report`, which calls C1 and renders the sections and Notes sentences) and the `evolvets gate1 report` CLI. Tests: 1, 4, 5, 10, 11, 12, and the subprocess part of 13.
+
+Time box for each PR: if you are 40 minutes in and CI is not green locally, open the PR with what works and list what is missing in the description; do not keep going silently. Write small files first, commit often, and run only the tests for the file you are editing until the end.
 
 ---
 

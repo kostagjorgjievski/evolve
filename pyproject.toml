@@ -78,6 +78,8 @@ module = [
     "evolvets.foundation.*",
     "evolvets.updater.interfaces",
     "evolvets.updater.baselines",
+    # TASK_011: every new runner module joins the strict list (PR A: runs).
+    "evolvets.runner.runs",
 ]
 strict = true
 

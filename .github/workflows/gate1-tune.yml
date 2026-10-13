@@ -1,0 +1,90 @@
+name: Gate 1 dev tuning (real dev data)
+
+# Runs `evolvets gate1 tune` on the lab node that holds the dev caches and the
+# foundation caches. The ledger is written to the node's persistent volume
+# (AGENTS.md 2.8: a ledger on an ephemeral machine would be lost). This is CPU
+# work: it never touches a GPU. Owner-only, manual dispatch only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_wall_seconds:
+        description: Wall-clock budget of the run in seconds (default two days)
+        default: "172800"
+      seed:
+        description: Updater seed
+        default: "0"
+
+concurrency:
+  group: gate1-tune
+  cancel-in-progress: false
+
+jobs:
+  tune:
+    if: github.actor == github.repository_owner
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 3600
+    env:
+      UV_INDEX_URL: ${{ vars.GPU_PIP_INDEX_URL }}
+      UV_PYTHON_PREFERENCE: only-system
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - name: Get code (clean checkout of this commit)
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          find . -mindepth 1 -delete
+          git_fetch() {
+            git init -q . &&
+            git -c "http.extraheader=AUTHORIZATION: bearer ${TOKEN}" \
+              -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+              fetch -q --depth 1 --no-tags "https://github.com/${REPO}.git" "${SHA}" &&
+            git checkout -q FETCH_HEAD
+          }
+          if timeout 60 bash -c "$(declare -f git_fetch); git_fetch"; then
+            echo "Got ${SHA} with git"
+          else
+            echo "git unavailable from $(hostname); downloading tarball via api.github.com"
+            find . -mindepth 1 -delete
+            curl -fsSL --retry 5 --retry-delay 10 --max-time 300 \
+              -H "Authorization: Bearer ${TOKEN}" \
+              "https://api.github.com/repos/${REPO}/tarball/${SHA}" \
+              | tar -xz --strip-components=1
+            # current_git_commit needs a git checkout with no modified files
+            git init -q . && git add -A >/dev/null && \
+              git -c user.name=ci -c user.email=ci@example.invalid commit -q -m "tarball of ${SHA}"
+          fi
+      - name: Paths
+        run: |
+          set -euo pipefail
+          base="${EVOLVETS_DATA:-/data}/evolve"
+          mkdir -p "$base/ledgers"
+          {
+            echo "DATA_ROOT=$base/data"
+            echo "CACHE_ROOT=$base/cache_store"
+            echo "FM_ROOT=$base/foundation_cache"
+            echo "LEDGER_ROOT=$base/ledgers"
+            echo "VENV=$base/venv-dev"
+          } >> "$GITHUB_ENV"
+      - name: Python environment from uv.lock
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bash .github/scripts/run-logged.sh "python env" bash .github/scripts/gpu-env.sh dev "$VENV"
+      - name: Tune
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          git status --porcelain
+          set +e
+          bash .github/scripts/run-logged.sh "gate1 tune" "$VENV/bin/evolvets" gate1 tune \
+            --dataset all --pool-spec simple --pool-spec simple+foundation \
+            --max-wall-seconds "${{ inputs.max_wall_seconds }}" --seed "${{ inputs.seed }}" \
+            --ledger-root "$LEDGER_ROOT" --cache-root "$CACHE_ROOT" \
+            --foundation-root "$FM_ROOT" --data-root "$DATA_ROOT" \
+            --manifest-dir data/manifests
+          code=$?
+          echo "exit code $code (0 completed, 2 budget_exhausted, 1 failure)"
+          ls "$LEDGER_ROOT" | tail -5
+          [ "$code" -eq 0 ] || [ "$code" -eq 2 ]

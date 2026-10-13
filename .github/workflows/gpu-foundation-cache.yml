@@ -29,8 +29,11 @@ on:
         description: "Contexts per model call"
         default: "32"
 
+# Builds for different (model, dataset) pairs run side by side, each on its own
+# free GPU (gpu-pick.sh). Do not dispatch two builds that share a model (they
+# share a venv) or a dataset (they share the simple cache) at the same time.
 concurrency:
-  group: gpu-foundation-cache
+  group: gpu-foundation-cache-${{ inputs.model }}-${{ inputs.dataset }}
   cancel-in-progress: false
 
 jobs:

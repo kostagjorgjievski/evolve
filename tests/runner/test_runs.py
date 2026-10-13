@@ -148,9 +148,9 @@ def test_config_with_non_string_key_is_refused(root):
     assert not (root / "run-a").exists()
 
 
-@pytest.mark.parametrize("run_id", ["run/a", "..", "run/../a", "run a"])
+@pytest.mark.parametrize("run_id", ["run/a", "..", "run/../a", "run a", "a..b", "x\n", "x\ny"])
 def test_bad_run_id_creates_nothing(root, run_id):
-    with pytest.raises(RunError, match="run id must match"):
+    with pytest.raises(RunError, match="run id"):
         start_run(root, run_id)
     assert list(Path(root).glob("*")) == [] or not (root / run_id).exists()
 
@@ -178,6 +178,33 @@ def test_normal_exit_without_end_aborts(root):
     records = read_records(root, "run-a")
     assert records[-1].payload.status == "aborted"
     assert records[-1].payload.summary["error"] == "run exited without run_end"
+
+
+def disk_full_append(*args, **kwargs):
+    """Stand-in for ``LedgerWriter.append`` that fails like a full disk."""
+    raise OSError("disk full")
+
+
+def test_failed_run_end_on_normal_exit_raises_and_releases(root, monkeypatch):
+    run = start_run(root)
+    monkeypatch.setattr(LedgerWriter, "append", disk_full_append)
+    with pytest.raises(OSError, match="disk full"), run:
+        pass
+    assert [record.kind for record in read_records(root, "run-a")] == ["run_start"]
+    with LedgerWriter(root, "run-a", "main"):
+        pass  # the failed exit released the lock
+    with pytest.raises(RunError, match="already ended"):
+        run.end("completed", {})
+
+
+def test_failed_run_end_on_exception_exit_keeps_original_and_releases(root, monkeypatch):
+    run = start_run(root)
+    monkeypatch.setattr(LedgerWriter, "append", disk_full_append)
+    with pytest.raises(RuntimeError, match="boom"), run:
+        raise RuntimeError("boom")
+    assert [record.kind for record in read_records(root, "run-a")] == ["run_start"]
+    with LedgerWriter(root, "run-a", "main"):
+        pass  # the failed exit released the lock
 
 
 def test_exit_after_end_adds_nothing_and_refuses_more(root):
@@ -281,3 +308,5 @@ def test_new_run_id_shape_and_uniqueness():
     assert new_run_id("gate1-tune") != first
     with pytest.raises(RunError, match="prefix"):
         new_run_id("Bad/Prefix")
+    with pytest.raises(RunError, match="prefix"):
+        new_run_id("gate1\n")

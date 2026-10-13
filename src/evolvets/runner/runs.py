@@ -4,7 +4,8 @@ A :class:`Run` owns one run's main stream for its lifetime. It writes the
 ``run_start`` (config blob, protocol versions, clean git commit, budget
 limits), appends records while summing what they charge, and guarantees a
 ``run_end`` — including when the run dies mid-flight, so a run that started
-is always visible in the ledger (AGENTS.md 2.8).
+is always visible in the ledger; a failed final write is never silent
+(AGENTS.md 2.8).
 """
 
 from __future__ import annotations
@@ -69,14 +70,14 @@ def current_git_commit(repo: Path) -> str:
     commit = _git(repo, "rev-parse", "HEAD").strip()
     if _git(repo, "status", "--porcelain", "--untracked-files=no"):
         raise RunError("working tree has uncommitted changes; commit before starting a run")
-    if not _COMMIT_RE.match(commit):
+    if not _COMMIT_RE.fullmatch(commit):
         raise RunError(f"HEAD is not a 40-lowercase-hex commit id: {commit!r}")
     return commit
 
 
 def new_run_id(prefix: str) -> str:
     """Return a fresh run id: ``<prefix>-<UTC stamp>-<8 hex>``."""
-    if not _PREFIX_RE.match(prefix):
+    if not _PREFIX_RE.fullmatch(prefix):
         raise RunError(f"run id prefix must match ^[a-z0-9][a-z0-9-]*$, got {prefix!r}")
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"{prefix}-{stamp}-{uuid.uuid4().hex[:8]}"
@@ -115,8 +116,10 @@ class Run:
         requires_predictions: bool = False,
     ) -> Run:
         """Open a run and write its ``run_start``; nothing is written on refusal."""
-        if not _RUN_ID_RE.match(run_id):
+        if not _RUN_ID_RE.fullmatch(run_id):
             raise RunError(f"run id must match ^[A-Za-z0-9][A-Za-z0-9._-]*$, got {run_id!r}")
+        if ".." in run_id:
+            raise RunError(f"run id must not contain '..': {run_id!r}")
         try:
             config_bytes = canonical_bytes(config)
         except (TypeError, ValueError) as exc:
@@ -205,7 +208,13 @@ class Run:
         return self
 
     def __exit__(self, exc_type: object, exc: BaseException | None, tb: object) -> None:
-        """Guarantee a ``run_end``: aborted on any exit that did not end the run."""
+        """Guarantee a ``run_end``: aborted on any exit that did not end the run.
+
+        If that final write itself fails, the writer is closed and this Run can
+        append nothing more. On a normal exit the write error propagates (it is
+        never swallowed); when an exception is already in flight, that original
+        exception propagates instead — the write error never displaces it.
+        """
         if self._ended:
             return
         error = (
@@ -214,7 +223,10 @@ class Run:
         try:
             self._writer.append("run_end", RunEnd(status="aborted", summary={"error": error}))
         except BaseException:
+            self._ended = True
             self._writer.close()
-            return  # the original exception propagates; never swallow it
+            if exc_type is not None:
+                return  # the original exception propagates; never displace it
+            raise  # nothing is in flight; never swallow the write error
         self._ended = True
         self._writer.close()

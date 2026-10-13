@@ -79,11 +79,12 @@ module = [
     "evolvets.updater.interfaces",
     "evolvets.updater.baselines",
     # TASK_011: every new runner module joins the strict list (PR A: runs;
-    # PR B: gate1_grids, gate1_tune; PR C1: gate1_report_data).
+    # PR B: gate1_grids, gate1_tune; PR C1: gate1_report_data; PR C2: gate1_report).
     "evolvets.runner.runs",
     "evolvets.runner.gate1_grids",
     "evolvets.runner.gate1_tune",
     "evolvets.runner.gate1_report_data",
+    "evolvets.runner.gate1_report",
 ]
 strict = true
 

@@ -47,7 +47,9 @@ The run lifecycle every later experiment uses. No tuning, no CLI.
 class RunError(Exception): ...
 
 
-def current_git_commit(repo: Path) -> str: ...  # 40 lowercase hex; raises RunError if dirty or not a repo
+def current_git_commit(
+    repo: Path,
+) -> str: ...  # 40 lowercase hex; raises RunError if dirty or not a repo
 
 
 def new_run_id(prefix: str) -> str: ...  # f"{prefix}-{UTC %Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
@@ -77,11 +79,20 @@ class Run:
     @property
     def spent(self) -> Budget: ...  # sum of the budgets of every record this Run appended
 
-    def put_blob(self, obj: object) -> str: ...  # BlobStore(<ledger_root>/<run_id>/blobs).put(canonical_bytes(obj))
+    def put_blob(
+        self, obj: object
+    ) -> str: ...  # BlobStore(<ledger_root>/<run_id>/blobs).put(canonical_bytes(obj))
     def append(
-        self, kind: str, payload: Payload, *, refers_to: Sequence[str] = (), budget: Budget | None = None
+        self,
+        kind: str,
+        payload: Payload,
+        *,
+        refers_to: Sequence[str] = (),
+        budget: Budget | None = None,
     ) -> Record: ...
-    def end(self, status: str, summary: Mapping[str, object]) -> Record: ...  # writes run_end, closes the writer
+    def end(
+        self, status: str, summary: Mapping[str, object]
+    ) -> Record: ...  # writes run_end, closes the writer
 
     def __enter__(self) -> "Run": ...
     def __exit__(self, exc_type, exc, tb) -> None: ...
@@ -134,7 +145,17 @@ Tuning grids, the recorded tuning run over dev pools, and the selection rule.
 
 ```python
 ETA_GRID: tuple[float, ...] = (
-    0.015625, 0.03125, 0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0,
+    0.015625,
+    0.03125,
+    0.0625,
+    0.125,
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    4.0,
+    8.0,
+    16.0,
 )  # 2**-6 .. 2**4
 ALPHA_GRID: tuple[float, ...] = (0.0001, 0.001, 0.003, 0.01, 0.03, 0.1)
 GATE1_GRIDS: Mapping[str, tuple[Mapping[str, ConfigValue], ...]]
@@ -162,7 +183,9 @@ class DevPaths:
     manifest_dir: Path
 
 
-def planned_replays(spec: TuneSpec, grids: Mapping[str, Sequence[Mapping[str, ConfigValue]]]) -> int: ...
+def planned_replays(
+    spec: TuneSpec, grids: Mapping[str, Sequence[Mapping[str, ConfigValue]]]
+) -> int: ...
 
 
 def tune(
@@ -269,6 +292,7 @@ A deterministic Markdown report of named dev runs, regenerated from the ledger a
 
 ```python
 class ReportError(Exception): ...
+
 
 BOOTSTRAP_RESAMPLES = 2000
 

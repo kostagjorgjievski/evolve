@@ -4,15 +4,17 @@
 ``run_start.protocol_versions["arena"]``. The arena protocol covers
 ``updater/interfaces.py``, ``arena/labels.py``, ``arena/replay.py``,
 ``arena/dev.py``, ``arena/pool.py``, ``arena/metrics.py``,
-``arena/evaluate.py`` and ``arena/sealed/``: any change that alters what an
-updater receives, what it may return, which origins are scored, any metric
-value, or what the sealed process layout promises a caller must bump it.
-Version 2 added the pool spec: a replay may now drive the simple five plus
-cached foundation experts (``simple+foundation``); a ``simple`` replay is
-bit-identical to version 1. The sealed pools serve the same spec — their
-foundation caches are built and joined under the sealed cache root, and the
-sealed server's request carries the spec and the model names. This file
-stays import-free.
+``arena/evaluate.py``, ``arena/oracles.py`` and ``arena/sealed/``: any change
+that alters what an updater receives, what it may return, which origins are
+scored, any metric value, or what the sealed process layout promises a caller
+must bump it. Version 2 added the pool spec: a replay may now drive the
+simple five plus cached foundation experts (``simple+foundation``); a
+``simple`` replay is bit-identical to version 1. The sealed pools serve the
+same spec — their foundation caches are built and joined under the sealed
+cache root, and the sealed server's request carries the spec and the model
+names. Version 3 added the hindsight oracles over the expert pool
+(``arena/oracles.py``); they change no replayed score, only what the arena
+can report about a pool. This file stays import-free.
 """
 
-ARENA_VERSION = "2"
+ARENA_VERSION = "3"

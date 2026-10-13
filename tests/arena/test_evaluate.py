@@ -294,11 +294,14 @@ def test_golden_synthetic_equal_weights(synthetic_pool) -> None:
     repinned it once: the result object gained ``pool_spec``,
     ``foundation_cache_ids`` and ``leakage_risk``, which the digest covers;
     tests/arena/test_pool.py proves the numbers themselves are unchanged.
+    Arena version 3 (the oracles) repinned it again: only the version string
+    inside the hashed object changed, which test_oracles.py test 10 proves by
+    stamping "2" back in and matching version 2's digest.
     """
     result = replay_dataset(lambda: EqualWeights(), {}, 0, synthetic_pool)  # type: ignore[arg-type]
     assert result.status == "ok"
     digest = sha256(canonical_bytes(result_to_obj(result))).hexdigest()
-    assert digest == "a3dcc509e2a085c7ff473cdfa02c9bc434b6aa419f1975fda03a6a31b7405fd5"
+    assert digest == "b6757835b23886016c8dec28abe15167652e034cbe37fda58bd513ed19425db8"
 
 
 # --- Test 14: determinism and AST guards ------------------------------------------------------
@@ -310,7 +313,7 @@ def test_two_replay_dataset_calls_are_equal(synthetic_pool) -> None:
     assert a == b
 
 
-@pytest.mark.parametrize("name", ["metrics.py", "evaluate.py", "dev.py", "pool.py"])
+@pytest.mark.parametrize("name", ["metrics.py", "evaluate.py", "dev.py", "pool.py", "oracles.py"])
 def test_no_float_sum_or_statistics(name: str) -> None:
     """The new arena modules never use builtin sum, math.fsum or statistics."""
     tree = ast.parse((SRC / "arena" / name).read_text(encoding="utf-8"))

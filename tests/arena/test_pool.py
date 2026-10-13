@@ -160,7 +160,7 @@ def _custom_spec(name: str, etth1: str) -> ModelSpec:
 
 
 def test_simple_pool_reproduces_version_1(synthetic_env: dict[str, Path]) -> None:
-    """A 'simple' replay under arena version 2 equals version 1's golden numbers.
+    """A 'simple' replay under the current arena version equals version 1's golden numbers.
 
     Stripping the three pool fields the version-2 result object added and
     stamping the version back to 1 must give version 1's golden digest byte
@@ -179,8 +179,8 @@ def test_simple_pool_reproduces_version_1(synthetic_env: dict[str, Path]) -> Non
     assert result.pool_spec == "simple" and result.foundation_cache_ids == ()
     assert result.leakage_risk is False
     obj = result_to_obj(result)
-    assert obj["arena_version"] == "2"
-    assert protocol_versions()["arena"] == "2"
+    assert obj["arena_version"] == "3"
+    assert protocol_versions()["arena"] == "3"
     v1_obj = {key: value for key, value in obj.items() if key not in V2_EXTRA_KEYS}
     v1_obj["arena_version"] = "1"
     assert sha256(canonical_bytes(v1_obj)).hexdigest() == V1_GOLDEN_DIGEST

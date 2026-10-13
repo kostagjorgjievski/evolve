@@ -50,14 +50,16 @@ def synthetic_pool(tmp_path_factory: pytest.TempPathFactory):
 #: on the per_family = 1 synthetic-dev pool (the TASK_007 fixture), pinned on the
 #: CI platform (Linux x86_64, CPython 3.11). Changing one requires a reason in the
 #: PR: a baseline's behaviour changed. These digests are not ARENA_VERSION-governed,
-#: but they will change when a later PR bumps ARENA_VERSION (the version string is
-#: inside the hashed object); repin them there.
+#: but they change when a PR bumps ARENA_VERSION (the version string is inside the
+#: hashed object); arena version 3 (the oracles) repinned them, and
+#: tests/arena/test_oracles.py test 10 proves only the version string changed by
+#: stamping "2" back in and matching version 2's digests.
 GOLDEN_DIGESTS = {
-    "equal": "a3dcc509e2a085c7ff473cdfa02c9bc434b6aa419f1975fda03a6a31b7405fd5",
-    "ftl": "9083f89f3accf8ac65128d2ea8cdf1b4234f4fb434aa239e4c4cd206d0d2767b",
-    "hedge": "ac63d96f53a32ecc8bca278d41a13a93d939866a8309fd0497a7012c9abcef82",
-    "fixed_share": "fe76980b8586497c8570edb0de10121ce91a78375445a47122a5a0419b8e2bb4",
-    "adahedge": "8da13ac2a3d465eeb4b7c2ab1c3d816d616ff5aaeeeb709c9ac241059c2149f2",
+    "equal": "b6757835b23886016c8dec28abe15167652e034cbe37fda58bd513ed19425db8",
+    "ftl": "7f58dd10fbfc79c724589767ecc9155d1fa61ba509de63194fc1412b78a6cb08",
+    "hedge": "f11dda9d21b674ceba2e7ac3797330b1ca9a2f6a503a00cde4dce4f86ce55e71",
+    "fixed_share": "15433e67fa521829145ad41c111408ab99136b113e74441c1545099b2d52d2b2",
+    "adahedge": "ecbfbe3e82c9169c6c3e5a7b21118627f54ae057eca677f96dc9c20c52067ade",
 }
 
 

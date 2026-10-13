@@ -1,4 +1,4 @@
-Status: active
+Status: done (PR A merged as #79; PR B merged as #81; PR C opened as #82 — no splits were needed)
 
 # Task 010: Hand-designed updater baselines and the hindsight oracles
 

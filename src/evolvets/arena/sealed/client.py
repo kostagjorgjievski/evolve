@@ -7,6 +7,12 @@ imported inside the spawned child by :func:`_server_entry`, so even loading
 this module loads no sealed code path. The caller receives exactly one reply —
 a receipt or a refusal — and never a traceback, an exception message or a
 sealed value from the server.
+
+Two request kinds share one process layout: an updater replay
+(:class:`SealedRequest`, :func:`evaluate_sealed`) and the hindsight oracles
+(:class:`SealedOracleRequest`, :func:`evaluate_sealed_oracle`). The oracle
+request runs no untrusted code, so it spawns no worker; it still records its
+outcome as a sealed ``baseline`` and charges only its wall-clock.
 """
 
 from __future__ import annotations
@@ -55,6 +61,21 @@ class SealedRequest:
 
 
 @dataclasses.dataclass(frozen=True)
+class SealedOracleRequest:
+    """The hindsight oracles of one sealed pool: no updater, no untrusted code.
+
+    The pool is picked exactly as :class:`SealedRequest` picks one: the server
+    loads it and joins its foundation caches; this module deliberately imports
+    nothing that can read a cache, so a pool the arena refuses surfaces as a
+    server failure naming the log.
+    """
+
+    dataset: str  # one of SEALED_DATASETS
+    pool_spec: str = "simple"  # "simple" | "simple+foundation" (arena.pool.POOL_SPECS)
+    foundation_models: tuple[str, ...] | None = None  # None: the pinned registry models
+
+
+@dataclasses.dataclass(frozen=True)
 class SealedPaths:
     """Where the sealed data, the manifests and the sealed caches live."""
 
@@ -92,19 +113,54 @@ def evaluate_sealed(
     without leaking any traceback, exception message or sealed value.
     """
     _validate(request, run_id=run_id, series_timeout_seconds=series_timeout_seconds)
+    return _round_trip(
+        _request_json(request),
+        ledger_root=ledger_root,
+        run_id=run_id,
+        paths=paths,
+        timeout=float(series_timeout_seconds),
+    )
+
+
+def evaluate_sealed_oracle(
+    request: SealedOracleRequest,
+    *,
+    ledger_root: Path,
+    run_id: str,
+    paths: SealedPaths,
+) -> SealedReceipt:
+    """Compute the hindsight oracles of one sealed pool in the server; return the receipt.
+
+    Same process layout as :func:`evaluate_sealed` — one spawned server, one
+    reply, the same refusals — but no updater runs, so no worker is spawned
+    and no series timeout applies. The oracle is part of the instrument, so
+    the server charges its wall-clock and no evaluation.
+    """
+    _validate_oracle(request, run_id=run_id)
+    return _round_trip(
+        _oracle_request_json(request),
+        ledger_root=ledger_root,
+        run_id=run_id,
+        paths=paths,
+        timeout=SERIES_TIMEOUT_SECONDS,  # inert for an oracle request: no worker runs
+    )
+
+
+def _round_trip(
+    request_json: bytes,
+    *,
+    ledger_root: Path,
+    run_id: str,
+    paths: SealedPaths,
+    timeout: float,
+) -> SealedReceipt:
+    """Spawn the sealed server with one request and turn its one reply into a receipt."""
     paths_json = _paths_json(paths)
     context = multiprocessing.get_context("spawn")
     parent_conn, child_conn = context.Pipe(duplex=True)
     process = context.Process(
         target=_server_entry,
-        args=(
-            child_conn,
-            _request_json(request),
-            Path(ledger_root),
-            run_id,
-            paths_json,
-            float(series_timeout_seconds),
-        ),
+        args=(child_conn, request_json, Path(ledger_root), run_id, paths_json, timeout),
         daemon=False,  # the server must spawn one worker per series itself
     )
     process.start()
@@ -175,15 +231,48 @@ def _validate(request: SealedRequest, *, run_id: str, series_timeout_seconds: fl
         raise SealedError(f"run_id must be a non-empty str, got {run_id!r}")
 
 
+def _validate_oracle(request: SealedOracleRequest, *, run_id: str) -> None:
+    """Refuse a malformed oracle request in the caller, spawning nothing."""
+    if request.dataset not in SEALED_DATASETS:
+        raise SealedError(
+            f"dataset must be one of {list(SEALED_DATASETS)}, got {request.dataset!r}"
+        )
+    if not isinstance(request.pool_spec, str) or not request.pool_spec:
+        raise SealedError(f"pool_spec must be a non-empty str, got {request.pool_spec!r}")
+    if request.foundation_models is not None:
+        if not request.foundation_models:
+            raise SealedError("foundation_models must name at least one model, or be None")
+        for name in request.foundation_models:
+            if not isinstance(name, str) or not name:
+                raise SealedError(f"foundation_models must be non-empty model names, got {name!r}")
+    if not isinstance(run_id, str) or not run_id:
+        raise SealedError(f"run_id must be a non-empty str, got {run_id!r}")
+
+
 def _request_json(request: SealedRequest) -> bytes:
     """The request as canonical JSON bytes — spawn pickles the args, the trusted direction."""
     return canonical_json(
         {
+            "kind": "updater",
             "dataset": request.dataset,
             "updater_id": request.updater_id,
             "updater_ref": request.updater_ref,
             "config": dict(request.config),
             "seed": request.seed,
+            "pool_spec": request.pool_spec,
+            "foundation_models": (
+                list(request.foundation_models) if request.foundation_models is not None else None
+            ),
+        }
+    ).encode("utf-8")
+
+
+def _oracle_request_json(request: SealedOracleRequest) -> bytes:
+    """The oracle request as canonical JSON bytes, with its smaller key set."""
+    return canonical_json(
+        {
+            "kind": "oracle",
+            "dataset": request.dataset,
             "pool_spec": request.pool_spec,
             "foundation_models": (
                 list(request.foundation_models) if request.foundation_models is not None else None

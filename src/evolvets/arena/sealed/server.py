@@ -1,15 +1,18 @@
 """The sealed server process: check the ledger, replay, record, reply once.
 
-Spawned by :func:`evolvets.arena.sealed.client.evaluate_sealed`, this is the
-only code besides the trusted CLI that imports
+Spawned by :func:`evolvets.arena.sealed.client.evaluate_sealed` and
+:func:`evolvets.arena.sealed.client.evaluate_sealed_oracle`, this is the only
+code besides the trusted CLI that imports
 :mod:`evolvets.arena.sealed.pools`. It checks the run's ledger before opening
 any sealed file, opens the sealed stream's writer before evaluating (so a
-concurrent request on the same run fails fast), replays the requested updater
-over the sealed pool through one fresh worker process per series, and writes
-the per-task blob and the ``baseline`` record before replying — whatever the
-outcome was. A failure before the record is written appends a traceback to
-``<data_root>/sealed/server.log`` and exits 2; the caller turns that into a
-:class:`~evolvets.arena.sealed.client.SealedError` naming only the log.
+concurrent request on the same run fails fast), serves the request — an
+updater replay over the sealed pool through one fresh worker process per
+series, or the hindsight oracles, which run no untrusted code and spawn no
+worker — and writes the per-task blob and the ``baseline`` record before
+replying, whatever the outcome was. A failure before the record is written
+appends a traceback to ``<data_root>/sealed/server.log`` and exits 2; the
+caller turns that into a :class:`~evolvets.arena.sealed.client.SealedError`
+naming only the log.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from evolvets.arena import ARENA_VERSION
 from evolvets.arena.dev import DevPool
 from evolvets.arena.errors import ArenaError
 from evolvets.arena.evaluate import replay_dataset, result_to_obj
+from evolvets.arena.oracles import oracle_dataset, oracle_to_obj
 from evolvets.arena.pool import pool_leakage_risk
 from evolvets.arena.sealed.pools import load_sealed_pool
 from evolvets.arena.sealed.remote import RemoteUpdaterFactory, SeriesTimeout
@@ -41,9 +45,19 @@ from evolvets.ledger.store import (
     LedgerWriter,
 )
 
-_REQUEST_KEYS = frozenset(
-    {"dataset", "updater_id", "updater_ref", "config", "seed", "pool_spec", "foundation_models"}
+_UPDATER_KEYS = frozenset(
+    {
+        "kind",
+        "dataset",
+        "updater_id",
+        "updater_ref",
+        "config",
+        "seed",
+        "pool_spec",
+        "foundation_models",
+    }
 )
+_ORACLE_KEYS = frozenset({"kind", "dataset", "pool_spec", "foundation_models"})
 _PATHS_KEYS = frozenset({"data_root", "manifest_dir", "sealed_cache_root"})
 
 
@@ -59,7 +73,7 @@ def _serve(
     request: dict[str, Any] | None = None
     paths: dict[str, Any] | None = None
     try:
-        request = _decode(request_json, _REQUEST_KEYS)
+        request = _decode_request(request_json)
         paths = _decode(paths_json, _PATHS_KEYS)
         _run(conn, request, paths, Path(ledger_root), run_id, timeout)
     except SystemExit:
@@ -69,7 +83,12 @@ def _serve(
         # happened before the record was written. Log it and die quietly: the
         # caller sees only the exit code and the log path, never a traceback.
         if paths is not None:
-            updater_id = str(request["updater_id"]) if request is not None else "unknown"
+            if request is None:
+                updater_id = "unknown"
+            elif "updater_id" in request:
+                updater_id = str(request["updater_id"])
+            else:  # an oracle request: it records and logs under the id "oracle"
+                updater_id = "oracle"
             _append_server_log(Path(str(paths["data_root"])), run_id, updater_id)
         raise SystemExit(2) from None
 
@@ -93,7 +112,10 @@ def _run(
         _reply(conn, {"refused": "sealed stream is locked"})
         return
     try:
-        _evaluate_and_record(conn, writer, request, paths, ledger_root, run_id, timeout)
+        if request["kind"] == "oracle":
+            _oracle_and_record(conn, writer, request, paths, ledger_root, run_id)
+        else:
+            _evaluate_and_record(conn, writer, request, paths, ledger_root, run_id, timeout)
     finally:
         writer.close()
 
@@ -217,6 +239,66 @@ def _replay(
     return result.status, result.error, dict(result.metrics), result_to_obj(result)
 
 
+def _oracle_and_record(
+    conn: Connection,
+    writer: LedgerWriter,
+    request: dict[str, Any],
+    paths: dict[str, Any],
+    ledger_root: Path,
+    run_id: str,
+) -> None:
+    """Load the sealed pool, compute the oracles, record, reply; no worker is spawned.
+
+    A pool the arena refuses before the record is written (a missing or
+    tampered sealed cache) fails the server as a whole, like an updater
+    request; a pool that loads but has no usable MASE scale is recorded as a
+    failed baseline, so a started sealed run is always in the ledger. The
+    oracle is part of the instrument, so it charges its wall-clock and no
+    evaluation.
+    """
+    pool = load_sealed_pool(
+        str(request["dataset"]),
+        Path(str(paths["data_root"])),
+        Path(str(paths["manifest_dir"])),
+        Path(str(paths["sealed_cache_root"])),
+        pool_spec=str(request["pool_spec"]),
+        foundation_models=_request_models(request["foundation_models"]),
+    )
+    started = time.monotonic()
+    try:
+        result = oracle_dataset(pool)
+    except Exception as exc:
+        _append_server_log(Path(str(paths["data_root"])), run_id, "oracle")
+        status = "failed"
+        error: str | None = f"sealed server error: {type(exc).__name__}"
+        metrics: dict[str, float] = {}
+        result_obj: dict[str, object] | None = None
+    else:
+        status = "ok"
+        error = None
+        metrics = dict(result.metrics)
+        result_obj = oracle_to_obj(result)
+    elapsed = time.monotonic() - started
+    per_task_blob: str | None = None
+    if result_obj is not None:
+        blob_obj: dict[str, object] = {"result": result_obj}
+        per_task_blob = BlobStore(ledger_root / run_id / "blobs").put(canonical_bytes(blob_obj))
+    record = writer.append(
+        "baseline",
+        Baseline(
+            updater_id="oracle",
+            hyperparams={},
+            pool="sealed",
+            status=status,
+            metrics=metrics,
+            per_task_blob=per_task_blob,
+            error=error,
+        ),
+        budget=Budget(wall_seconds=elapsed, evaluations=0),
+    )
+    _reply(conn, {"record_id": record.record_id, "status": status})
+
+
 def _request_models(raw: object) -> list[str] | None:
     """Return the request's foundation model names, or ``None`` for the default pool."""
     if raw is None:
@@ -261,3 +343,25 @@ def _decode(raw: bytes, keys: frozenset[str]) -> dict[str, Any]:
     if not isinstance(obj, dict) or set(obj) != keys:
         raise ArenaError(f"malformed sealed server argument; expected exactly {sorted(keys)}")
     return cast("dict[str, Any]", obj)
+
+
+def _decode_request(raw: bytes) -> dict[str, Any]:
+    """Decode the request and check the exact key set its ``kind`` requires."""
+    obj: object = json.loads(raw.decode("utf-8"))
+    if not isinstance(obj, dict):
+        raise ArenaError("malformed sealed server request; expected an object")
+    request = cast("dict[str, Any]", obj)
+    kind = request.get("kind")
+    if kind == "updater":
+        keys = _UPDATER_KEYS
+    elif kind == "oracle":
+        keys = _ORACLE_KEYS
+    else:
+        raise ArenaError(
+            f"malformed sealed server request; kind must be 'updater' or 'oracle', got {kind!r}"
+        )
+    if set(request) != keys:
+        raise ArenaError(
+            f"malformed sealed server request; expected exactly {sorted(keys)} for kind {kind!r}"
+        )
+    return request

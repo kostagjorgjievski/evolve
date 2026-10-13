@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Iterator
+import time
+from collections.abc import Iterator, Mapping
 from dataclasses import asdict
 from pathlib import Path
+from typing import cast
 
 from evolvets import __version__
+from evolvets.arena.dev import DevPool, load_dev_pool
 from evolvets.arena.errors import ArenaError
+from evolvets.arena.evaluate import replay_dataset, result_to_obj
+from evolvets.arena.oracles import oracle_dataset, oracle_to_obj
+from evolvets.arena.pool import POOL_SPECS
 from evolvets.arena.realdata import sources
 from evolvets.arena.realdata.fetch import FetchError, fetch, file_sha256, verify_raw
 from evolvets.arena.realdata.manifest import ManifestError, RawManifest
@@ -46,12 +52,18 @@ from evolvets.foundation.store import (
     foundation_cache_id,
     verify_foundation_cache,
 )
+from evolvets.ledger.canonical import canonical_json
 from evolvets.ledger.store import LedgerLockedError, LedgerReader, LedgerWriter
 from evolvets.ledger.validate import validate_run
+from evolvets.updater.baselines import BASELINE_IDS, BASELINES, DEFAULT_CONFIGS
+from evolvets.updater.interfaces import ConfigValue
 
 _DATASET_ORDER = ("etth1", "ecl")
 #: ``--model`` choices: the test/CI fake, then the registry's model order.
 _FOUNDATION_MODELS = ("fake", *MODELS)
+#: Where ``evolvets foundation build`` installs its caches; ``arena replay``
+#: joins the pooled spec's foundation caches from the same root.
+_FOUNDATION_ROOT = "foundation_cache"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -138,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="which model ('fake' for tests and CI; real models resolve through their adapters)",
     )
     foundation_build.add_argument(
-        "--root", default="foundation_cache", help="foundation cache root directory"
+        "--root", default=_FOUNDATION_ROOT, help="foundation cache root directory"
     )
     foundation_build.add_argument(
         "--cache-root", default="cache_store", help="simple cache root directory"
@@ -172,7 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="which model ('fake' for tests and CI; real models resolve through their adapters)",
     )
     foundation_verify.add_argument(
-        "--root", default="foundation_cache", help="foundation cache root directory"
+        "--root", default=_FOUNDATION_ROOT, help="foundation cache root directory"
     )
     foundation_compare = foundation_sub.add_parser(
         "compare",
@@ -188,7 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="which model ('fake' for tests and CI; real models resolve through their adapters)",
     )
     foundation_compare.add_argument(
-        "--root", default="foundation_cache", help="foundation cache root directory"
+        "--root", default=_FOUNDATION_ROOT, help="foundation cache root directory"
     )
     foundation_compare.add_argument("--data-root", default="data", help="data root directory")
     foundation_compare.add_argument(
@@ -285,6 +297,56 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="adapter device; auto uses CUDA when available",
     )
+
+    arena = subparsers.add_parser(
+        "arena", help="dev replays and hindsight oracles (no sealed data, no ledger)"
+    )
+    arena_sub = arena.add_subparsers(dest="arena_command", metavar="ARENA-COMMAND")
+    arena_replay = arena_sub.add_parser(
+        "replay", help="replay one baseline updater over a dev pool"
+    )
+    arena_oracle = arena_sub.add_parser("oracle", help="print the hindsight oracles of a dev pool")
+    for command in (arena_replay, arena_oracle):
+        command.add_argument(
+            "dataset",
+            choices=CACHE_DATASETS,
+            help="which dev dataset (sealed pools are served by the sealed server)",
+        )
+        command.add_argument(
+            "--pool-spec",
+            choices=POOL_SPECS,
+            default="simple",
+            help="which experts the pool replays (default: simple)",
+        )
+        command.add_argument(
+            "--foundation-model",
+            nargs="+",
+            metavar="NAME",
+            help="foundation models to join (simple+foundation only; default: the registry)",
+        )
+        command.add_argument("--cache-root", default="cache_store", help="cache root directory")
+        command.add_argument(
+            "--foundation-root",
+            default=_FOUNDATION_ROOT,
+            help="foundation cache root directory (as 'evolvets foundation build')",
+        )
+        command.add_argument("--data-root", default="data", help="data root directory")
+        command.add_argument(
+            "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+        )
+    arena_replay.add_argument(
+        "--updater",
+        choices=BASELINE_IDS,
+        required=True,
+        help="which baseline updater to replay",
+    )
+    arena_replay.add_argument(
+        "--config",
+        type=_json_object,
+        metavar="JSON",
+        help="updater config as a JSON object (default: the baseline's DEFAULT_CONFIGS entry)",
+    )
+    arena_replay.add_argument("--seed", type=int, default=0, help="updater seed (default: 0)")
     return parser
 
 
@@ -561,6 +623,66 @@ def _cmd_sealed_foundation_build(
     return 0
 
 
+def _json_object(text: str) -> dict[str, ConfigValue]:
+    """Parse ``--config`` as a JSON object (an argparse type)."""
+    try:
+        obj: object = json.loads(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--config must be JSON: {exc}") from exc
+    if not isinstance(obj, dict):
+        raise argparse.ArgumentTypeError(f"--config must be a JSON object, got {text!r}")
+    return cast("dict[str, ConfigValue]", obj)
+
+
+def _arena_pool(args: argparse.Namespace) -> DevPool:
+    """Load the dev pool an arena command replays or oracles over."""
+    models = tuple(args.foundation_model) if args.foundation_model else None
+    return load_dev_pool(
+        args.dataset,
+        Path(args.cache_root),
+        Path(args.data_root),
+        Path(args.manifest_dir),
+        pool_spec=args.pool_spec,
+        foundation_root=(
+            Path(args.foundation_root) if args.pool_spec == "simple+foundation" else None
+        ),
+        foundation_models=models,
+    )
+
+
+def _cmd_arena_replay(args: argparse.Namespace) -> int:
+    """Replay one baseline over a dev pool; one JSON line, FAIL on an ArenaError."""
+    config: Mapping[str, ConfigValue] = (
+        args.config if args.config is not None else DEFAULT_CONFIGS[args.updater]
+    )
+    try:
+        pool = _arena_pool(args)
+        started = time.monotonic()
+        result = replay_dataset(BASELINES[args.updater], config, args.seed, pool)
+    except ArenaError as exc:
+        print(f"FAIL {args.dataset}: {exc}")
+        return 1
+    obj = result_to_obj(result)
+    del obj["series"]
+    print(canonical_json({"result": obj, "wall_seconds": time.monotonic() - started}))
+    return 0  # a failed updater is a result, not an error
+
+
+def _cmd_arena_oracle(args: argparse.Namespace) -> int:
+    """Print one dev pool's hindsight oracles; one JSON line, FAIL on an ArenaError."""
+    try:
+        pool = _arena_pool(args)
+        started = time.monotonic()
+        result = oracle_dataset(pool)
+    except ArenaError as exc:
+        print(f"FAIL {args.dataset}: {exc}")
+        return 1
+    obj = oracle_to_obj(result)
+    del obj["series"]
+    print(canonical_json({"result": obj, "wall_seconds": time.monotonic() - started}))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the EvolveTS CLI."""
     parser = build_parser()
@@ -644,6 +766,13 @@ def main(argv: list[str] | None = None) -> int:
                 args.batch_size,
                 args.device,
             )
+        parser.print_help()
+        return 0
+    if args.command == "arena":
+        if args.arena_command == "replay":
+            return _cmd_arena_replay(args)
+        if args.arena_command == "oracle":
+            return _cmd_arena_oracle(args)
         parser.print_help()
         return 0
     if args.command is None:

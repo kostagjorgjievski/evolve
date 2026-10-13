@@ -77,6 +77,7 @@ module = [
     "evolvets.experts.*",
     "evolvets.foundation.*",
     "evolvets.updater.interfaces",
+    "evolvets.updater.baselines",
 ]
 strict = true
 

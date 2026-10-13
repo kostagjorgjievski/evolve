@@ -57,6 +57,7 @@ from evolvets.ledger.payloads import RunEnd
 from evolvets.ledger.store import LedgerLockedError, LedgerReader, LedgerWriter
 from evolvets.ledger.validate import validate_run
 from evolvets.runner.gate1_grids import GATE1_GRIDS
+from evolvets.runner.gate1_report import ReportError, build_report
 from evolvets.runner.gate1_tune import DevPaths, TuneSpec, tune
 from evolvets.runner.runs import RunError, current_git_commit, new_run_id
 from evolvets.updater.baselines import BASELINE_IDS, BASELINES, DEFAULT_CONFIGS
@@ -353,7 +354,7 @@ def build_parser() -> argparse.ArgumentParser:
     arena_replay.add_argument("--seed", type=int, default=0, help="updater seed (default: 0)")
 
     gate1 = subparsers.add_parser(
-        "gate1", help="Gate 1: recorded dev tuning in the ledger (the report arrives with PR C)"
+        "gate1", help="Gate 1: recorded dev tuning in the ledger and the report from it"
     )
     gate1_sub = gate1.add_subparsers(dest="gate1_command", metavar="GATE1-COMMAND")
     gate1_tune_cmd = gate1_sub.add_parser(
@@ -399,6 +400,27 @@ def build_parser() -> argparse.ArgumentParser:
     gate1_tune_cmd.add_argument("--data-root", default="data", help="data root directory")
     gate1_tune_cmd.add_argument(
         "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+    )
+    gate1_report_cmd = gate1_sub.add_parser(
+        "report", help="regenerate the deterministic Markdown report of named dev runs"
+    )
+    gate1_report_cmd.add_argument(
+        "--ledger-root", default="ledgers", help="ledger root directory (contains <run_id>/)"
+    )
+    gate1_report_cmd.add_argument(
+        "--run",
+        metavar="ID",
+        action="append",
+        required=True,
+        help="run id to report; repeatable, in report order",
+    )
+    gate1_report_cmd.add_argument(
+        "--bootstrap-seed", type=int, default=0, help="seed of the gaps' paired bootstrap"
+    )
+    gate1_report_output = gate1_report_cmd.add_mutually_exclusive_group(required=True)
+    gate1_report_output.add_argument("--out", metavar="PATH", help="write the report to PATH")
+    gate1_report_output.add_argument(
+        "--check", metavar="PATH", help="compare the regenerated report against PATH"
     )
     return parser
 
@@ -799,6 +821,44 @@ def _cmd_gate1_tune(args: argparse.Namespace) -> int:
     return 0 if status == "completed" else 2
 
 
+def _cmd_gate1_report(args: argparse.Namespace) -> int:
+    """Build the dev report from the ledger, then write it or check a copy.
+
+    The report is built before anything is written, so a refusal leaves
+    ``--out`` unwritten; ``--check`` reports the first differing line.
+    """
+    try:
+        report = build_report(Path(args.ledger_root), args.run, bootstrap_seed=args.bootstrap_seed)
+    except ReportError as exc:
+        print(f"FAIL {exc}")
+        return 1
+    if args.out is not None:
+        Path(args.out).write_text(report, encoding="utf-8")
+        print(f"OK wrote {args.out}")
+        return 0
+    return _check_report(args.check, report)
+
+
+def _check_report(path: str, report: str) -> int:
+    """Compare the built report with the file at ``path``; FAIL names the first difference."""
+    try:
+        existing = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"FAIL {exc}")
+        return 1
+    built = report.splitlines()
+    written = existing.splitlines()
+    for number, (left, right) in enumerate(zip(built, written, strict=False), start=1):
+        if left != right:
+            print(f"FAIL {path}: differs at line {number}")
+            return 1
+    if len(built) != len(written):
+        print(f"FAIL {path}: differs at line {min(len(built), len(written)) + 1}")
+        return 1
+    print(f"OK {path} matches ({len(built)} lines)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the EvolveTS CLI."""
     parser = build_parser()
@@ -894,6 +954,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "gate1":
         if args.gate1_command == "tune":
             return _cmd_gate1_tune(args)
+        if args.gate1_command == "report":
+            return _cmd_gate1_report(args)
         parser.print_help()
         return 0
     if args.command is None:

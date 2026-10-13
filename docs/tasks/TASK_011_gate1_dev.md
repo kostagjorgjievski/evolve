@@ -1,4 +1,4 @@
-Status: active
+Status: done (PR A merged as #85; PR B split into grids #86 and tune #87; PR C split into data #91 and report #92; side PRs #89 and #90)
 
 # Task 011: Gate 1 on dev: recorded runs, tuning grids and the report generator
 

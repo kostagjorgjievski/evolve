@@ -82,6 +82,7 @@ module = [
     # PR B: gate1_grids, gate1_tune).
     "evolvets.runner.runs",
     "evolvets.runner.gate1_grids",
+    "evolvets.runner.gate1_tune",
 ]
 strict = true
 

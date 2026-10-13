@@ -53,8 +53,12 @@ from evolvets.foundation.store import (
     verify_foundation_cache,
 )
 from evolvets.ledger.canonical import canonical_json
+from evolvets.ledger.payloads import RunEnd
 from evolvets.ledger.store import LedgerLockedError, LedgerReader, LedgerWriter
 from evolvets.ledger.validate import validate_run
+from evolvets.runner.gate1_grids import GATE1_GRIDS
+from evolvets.runner.gate1_tune import DevPaths, TuneSpec, tune
+from evolvets.runner.runs import RunError, current_git_commit, new_run_id
 from evolvets.updater.baselines import BASELINE_IDS, BASELINES, DEFAULT_CONFIGS
 from evolvets.updater.interfaces import ConfigValue
 
@@ -347,6 +351,55 @@ def build_parser() -> argparse.ArgumentParser:
         help="updater config as a JSON object (default: the baseline's DEFAULT_CONFIGS entry)",
     )
     arena_replay.add_argument("--seed", type=int, default=0, help="updater seed (default: 0)")
+
+    gate1 = subparsers.add_parser(
+        "gate1", help="Gate 1: recorded dev tuning in the ledger (the report arrives with PR C)"
+    )
+    gate1_sub = gate1.add_subparsers(dest="gate1_command", metavar="GATE1-COMMAND")
+    gate1_tune_cmd = gate1_sub.add_parser(
+        "tune", help="replay every tuning grid over dev pools inside one recorded run"
+    )
+    gate1_tune_cmd.add_argument(
+        "--dataset",
+        choices=[*CACHE_DATASETS, "all"],
+        action="append",
+        required=True,
+        help="which dev datasets to tune; repeatable, 'all' expands to every cache dataset",
+    )
+    gate1_tune_cmd.add_argument(
+        "--pool-spec",
+        choices=POOL_SPECS,
+        action="append",
+        required=True,
+        help="which pool specs to replay; repeatable",
+    )
+    gate1_tune_cmd.add_argument(
+        "--foundation-model",
+        nargs="+",
+        metavar="NAME",
+        help="foundation models to join (simple+foundation only; default: the registry)",
+    )
+    gate1_tune_cmd.add_argument("--seed", type=int, default=0, help="updater seed (default: 0)")
+    gate1_tune_cmd.add_argument(
+        "--max-wall-seconds",
+        type=float,
+        default=172800.0,
+        help="wall-clock budget of the run in seconds (default: 172800, two days)",
+    )
+    gate1_tune_cmd.add_argument("--ledger-root", default="ledgers", help="ledger root directory")
+    gate1_tune_cmd.add_argument(
+        "--run-id", metavar="ID", help="run id (default: a fresh gate1-tune id)"
+    )
+    gate1_tune_cmd.add_argument("--cache-root", default="cache_store", help="cache root directory")
+    gate1_tune_cmd.add_argument(
+        "--foundation-root",
+        default=_FOUNDATION_ROOT,
+        help="foundation cache root directory (as 'evolvets foundation build')",
+    )
+    gate1_tune_cmd.add_argument("--data-root", default="data", help="data root directory")
+    gate1_tune_cmd.add_argument(
+        "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+    )
     return parser
 
 
@@ -683,6 +736,69 @@ def _cmd_arena_oracle(args: argparse.Namespace) -> int:
     return 0
 
 
+def _gate1_tune_spec(args: argparse.Namespace) -> TuneSpec:
+    """Build the TuneSpec from the CLI arguments, first-seen order, duplicates dropped."""
+    datasets: list[str] = []
+    for name in args.dataset:
+        for dataset in CACHE_DATASETS if name == "all" else (name,):
+            if dataset not in datasets:
+                datasets.append(dataset)
+    pool_specs: list[str] = []
+    for pool_spec in args.pool_spec:
+        if pool_spec not in pool_specs:
+            pool_specs.append(pool_spec)
+    return TuneSpec(
+        datasets=tuple(datasets),
+        pool_specs=tuple(pool_specs),
+        foundation_models=tuple(args.foundation_model) if args.foundation_model else None,
+        seed=args.seed,
+        max_wall_seconds=args.max_wall_seconds,
+    )
+
+
+def _cmd_gate1_tune(args: argparse.Namespace) -> int:
+    """Run the dev tuning sweep in one recorded run; OK plus the ledger's own summary."""
+    try:
+        git_commit = current_git_commit(Path.cwd())
+    except RunError as exc:
+        print(f"FAIL {exc}")
+        return 1
+    spec = _gate1_tune_spec(args)
+    paths = DevPaths(
+        cache_root=Path(args.cache_root),
+        foundation_root=Path(args.foundation_root),
+        data_root=Path(args.data_root),
+        manifest_dir=Path(args.manifest_dir),
+    )
+    run_id = args.run_id if args.run_id is not None else new_run_id("gate1-tune")
+    ledger_root = Path(args.ledger_root)
+    main_stream = ledger_root / run_id / "main.jsonl"
+    reused = main_stream.exists()
+    try:
+        status = tune(
+            spec,
+            paths,
+            ledger_root=ledger_root,
+            run_id=run_id,
+            git_commit=git_commit,
+            grids=GATE1_GRIDS,
+        )
+    except Exception as exc:
+        # A run this invocation started and aborted is reported by run id; a
+        # refusal before start (bad spec, unloadable pool, reused run id) is not.
+        if main_stream.exists() and not reused:
+            print(f"FAIL {run_id} aborted: {exc}")
+        else:
+            print(f"FAIL {exc}")
+        return 1
+    records = list(LedgerReader(ledger_root, run_id).records())
+    run_end = records[-1].payload
+    summary = run_end.summary if isinstance(run_end, RunEnd) else {}
+    print(f"OK {run_id} {status}")
+    print(canonical_json(summary))
+    return 0 if status == "completed" else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the EvolveTS CLI."""
     parser = build_parser()
@@ -773,6 +889,11 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_arena_replay(args)
         if args.arena_command == "oracle":
             return _cmd_arena_oracle(args)
+        parser.print_help()
+        return 0
+    if args.command == "gate1":
+        if args.gate1_command == "tune":
+            return _cmd_gate1_tune(args)
         parser.print_help()
         return 0
     if args.command is None:

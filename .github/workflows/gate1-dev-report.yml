@@ -37,11 +37,23 @@ jobs:
         run: |
           set -euo pipefail
           find . -mindepth 1 -delete
-          git init -q .
-          timeout 120 git -c "http.extraheader=AUTHORIZATION: bearer ${TOKEN}" \
-            -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
-            fetch -q --depth 1 --no-tags "https://github.com/${REPO}.git" "${SHA}"
-          git checkout -q FETCH_HEAD
+          # Dev-only workflow: a tarball is fine here (the report is built from the
+          # ledger, not from this checkout), unlike the sealed workflows.
+          if git init -q . &&
+            timeout 90 git -c "http.extraheader=AUTHORIZATION: bearer ${TOKEN}" \
+              -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+              fetch -q --depth 1 --no-tags "https://github.com/${REPO}.git" "${SHA}" &&
+            git checkout -q FETCH_HEAD; then
+            echo "Got ${SHA} with git"
+          else
+            echo "git unavailable from $(hostname); downloading tarball via api.github.com"
+            find . -mindepth 1 -delete
+            curl -fsSL --retry 5 --retry-delay 10 --max-time 300 \
+              -H "Authorization: Bearer ${TOKEN}" \
+              "https://api.github.com/repos/${REPO}/tarball/${SHA}" \
+              | tar -xz --strip-components=1
+          fi
+          test -f .github/scripts/gpu-env.sh
       - name: Paths
         run: |
           set -euo pipefail

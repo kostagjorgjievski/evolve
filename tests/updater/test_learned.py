@@ -1,10 +1,13 @@
-"""Unit tests for the ridge_stack learned updater (TASK_014 PR A, tests 1-12).
+"""Unit tests for the learned updaters (TASK_014 PR A tests 1-12, PR B tests 1-8).
 
 Every test drives ``init``/``update`` directly with hand-built Context and
 Matured objects, feeding the Matured for step ``k - 1`` at step ``k`` unless
 it says otherwise; the replay tests wrap the updater in a recorder and run
 ``replay_series`` over hand-built forecasts, and the arena tests replay the
-synthetic-dev fixtures of ``tests/updater/test_baselines_replay.py``.
+synthetic-dev fixtures of ``tests/updater/test_baselines_replay.py``. The
+tests PR A states for one updater and PR B repeats for both are parametrised
+over ``LEARNED_IDS``; the ridge_stack-specific ones (closed form, behaviour,
+refit schedule, overflow) stay on ``RidgeStack`` alone.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from typing import Any
 import pytest
 
 from evolvets.arena.dev import load_dev_pool
+from evolvets.arena.errors import UpdaterFailure
 from evolvets.arena.evaluate import replay_dataset
 from evolvets.arena.replay import replay_series
 from evolvets.cache.datasets import public_inputs
@@ -31,14 +35,18 @@ from evolvets.updater.learned import (
     LEARNED,
     LEARNED_DEFAULT_CONFIGS,
     LEARNED_IDS,
+    LossGate,
     RidgeStack,
+    loss_gate,
     project_to_simplex,
-    ridge_stack,
     solve_linear,
 )
 
 SRC = Path(__file__).parents[2] / "src" / "evolvets"
 CONFIG = dict(LEARNED_DEFAULT_CONFIGS["ridge_stack"])
+CONFIGS: dict[str, dict[str, Any]] = {
+    name: dict(values) for name, values in LEARNED_DEFAULT_CONFIGS.items()
+}
 
 
 def names(n_experts: int) -> tuple[str, ...]:
@@ -46,15 +54,26 @@ def names(n_experts: int) -> tuple[str, ...]:
     return tuple(f"e{e}" for e in range(n_experts))
 
 
-def step_context(n_experts: int, horizon: int, step: int = 0) -> Context:
-    """A valid context: constant forecasts, the horizon the updater was init'ed with."""
+def step_context(
+    n_experts: int,
+    horizon: int,
+    step: int = 0,
+    forecasts: tuple[tuple[float, ...], ...] | None = None,
+    period: int = 7,
+) -> Context:
+    """A valid context: constant forecasts (or ``forecasts``), the init'ed horizon."""
+    rows = (
+        forecasts
+        if forecasts is not None
+        else tuple(tuple(0.5 for _ in range(horizon)) for _ in range(n_experts))
+    )
     return Context(
         step=step,
-        season_index=step % 7,
-        period=7,
+        season_index=step % period,
+        period=period,
         horizon=horizon,
         expert_names=names(n_experts),
-        forecasts=tuple(tuple(0.5 for _ in range(horizon)) for _ in range(n_experts)),
+        forecasts=rows,
     )
 
 
@@ -146,12 +165,13 @@ def replay_probe(
     n_experts: int,
     horizon: int,
     n_origins: int,
+    config: dict[str, Any],
     seed: int = 0,
 ) -> Any:
     """replay_series over a hand-built fixture of ``n_origins`` origins."""
     return replay_series(
         updater,
-        CONFIG,
+        config,
         seed,
         "probe",
         HandForecasts(rows),
@@ -168,17 +188,20 @@ def replay_probe(
 
 def test_registry_shape() -> None:
     """LEARNED_IDS lists the registry keys in order; each id names its own factory."""
-    assert LEARNED_IDS == ("ridge_stack",)
+    assert LEARNED_IDS == ("ridge_stack", "loss_gate")
     assert tuple(LEARNED) == LEARNED_IDS
     assert set(LEARNED_DEFAULT_CONFIGS) == set(LEARNED_IDS)
     module = importlib.import_module("evolvets.updater.learned")
     assert module.ridge_stack is LEARNED["ridge_stack"]
-    assert LEARNED["ridge_stack"]() is not LEARNED["ridge_stack"]()
+    assert module.loss_gate is LEARNED["loss_gate"]
+    for factory in LEARNED.values():
+        assert factory() is not factory()
 
 
 def test_default_config_is_accepted_and_read_only() -> None:
-    """The default config inits cleanly, and neither layer of it can be mutated."""
-    assert RidgeStack().init(4, 3, LEARNED_DEFAULT_CONFIGS["ridge_stack"], 0)
+    """Every default config inits cleanly, and neither layer of them can be mutated."""
+    for learned_id in LEARNED_IDS:
+        assert LEARNED[learned_id]().init(4, 3, LEARNED_DEFAULT_CONFIGS[learned_id], 0)
     for mapping in (LEARNED_DEFAULT_CONFIGS, *LEARNED_DEFAULT_CONFIGS.values()):
         with pytest.raises(TypeError):
             mapping["x"] = 1  # type: ignore[index]
@@ -187,53 +210,75 @@ def test_default_config_is_accepted_and_read_only() -> None:
 # --- Test 2: config validation --------------------------------------------------------------------
 
 
-def _bad_configs() -> list[tuple[str, dict[str, Any], str]]:
-    """(label, config, message needle) for every ridge_stack init refusal."""
-    good: dict[str, Any] = {"half_life": 336.0, "shrink": 1.0, "refit_every": 24}
-    cases = [
-        ("missing-key", {"shrink": 1.0, "refit_every": 24}, "config keys"),
-        ("extra-key", good | {"eta": 1.0}, "config keys"),
-        ("half-life-zero", good | {"half_life": 0}, "half_life"),
-        ("half-life-negative", good | {"half_life": -1.0}, "half_life"),
-        ("half-life-nan", good | {"half_life": float("nan")}, "half_life"),
-        ("half-life-inf", good | {"half_life": float("inf")}, "half_life"),
-        ("half-life-bool", good | {"half_life": True}, "half_life"),
-        ("shrink-zero", good | {"shrink": 0}, "shrink"),
-        ("shrink-nan", good | {"shrink": float("nan")}, "shrink"),
-        ("refit-zero", good | {"refit_every": 0}, "refit_every"),
-        ("refit-fraction", good | {"refit_every": 1.5}, "refit_every"),
-        ("refit-bool", good | {"refit_every": True}, "refit_every"),
+def _bad_configs() -> list[tuple[str, str, dict[str, Any], str]]:
+    """(updater id, label, config, message needle) for every learned init refusal."""
+    ridge, gate = CONFIGS["ridge_stack"], CONFIGS["loss_gate"]
+    cases: list[tuple[str, str, dict[str, Any], str]] = [
+        (
+            "ridge_stack",
+            "missing-key",
+            {k: v for k, v in ridge.items() if k != "shrink"},
+            "config keys",
+        ),
+        ("ridge_stack", "extra-key", ridge | {"eta": 1.0}, "config keys"),
+        ("ridge_stack", "shrink-zero", ridge | {"shrink": 0}, "shrink"),
+        ("ridge_stack", "shrink-nan", ridge | {"shrink": float("nan")}, "shrink"),
+        ("loss_gate", "missing-key", {k: v for k, v in gate.items() if k != "beta"}, "config keys"),
+        ("loss_gate", "extra-key", gate | {"shrink": 1.0}, "config keys"),
+        ("loss_gate", "beta-zero", gate | {"beta": 0}, "beta"),
+        ("loss_gate", "beta-negative", gate | {"beta": -1.0}, "beta"),
+        ("loss_gate", "beta-nan", gate | {"beta": float("nan")}, "beta"),
+        ("loss_gate", "beta-inf", gate | {"beta": float("inf")}, "beta"),
+        ("loss_gate", "beta-bool", gate | {"beta": True}, "beta"),
+        ("loss_gate", "ridge-zero", gate | {"ridge": 0}, "ridge"),
+        ("loss_gate", "ridge-negative", gate | {"ridge": -0.5}, "ridge"),
+        ("loss_gate", "ridge-nan", gate | {"ridge": float("nan")}, "ridge"),
     ]
+    half_lives = [0, -1.0, float("nan"), float("inf"), True]
+    refits = [0, 1.5, True]
+    for value in half_lives:
+        label = f"half-life-{value!r}"
+        cases.append(("ridge_stack", label, ridge | {"half_life": value}, "half_life"))
+        cases.append(("loss_gate", label, gate | {"half_life": value}, "half_life"))
+    for value in refits:
+        label = f"refit-{value!r}"
+        cases.append(("ridge_stack", label, ridge | {"refit_every": value}, "refit_every"))
+        cases.append(("loss_gate", label, gate | {"refit_every": value}, "refit_every"))
     return cases
 
 
-_CASE_IDS = [case[0] for case in _bad_configs()]
+_CASES = _bad_configs()
+_CASE_IDS = [f"{learned_id}-{label}" for learned_id, label, _, _ in _CASES]
 
 
-@pytest.mark.parametrize(("label", "config", "needle"), _bad_configs(), ids=_CASE_IDS)
-def test_init_rejects_bad_configs(label: str, config: dict[str, Any], needle: str) -> None:
-    """An unknown or missing key, or a bad half_life, shrink or refit_every, raises."""
+@pytest.mark.parametrize(("learned_id", "label", "config", "needle"), _CASES, ids=_CASE_IDS)
+def test_init_rejects_bad_configs(
+    learned_id: str, label: str, config: dict[str, Any], needle: str
+) -> None:
+    """An unknown or missing key, or a bad beta, half_life, ridge, shrink or refit_every, raises."""
     with pytest.raises(ValueError, match=needle):
-        RidgeStack().init(3, 2, config, 0)
+        LEARNED[learned_id]().init(3, 2, config, 0)
 
 
-def test_init_rejects_bad_scalars() -> None:
+@pytest.mark.parametrize("learned_id", LEARNED_IDS)
+def test_init_rejects_bad_scalars(learned_id: str) -> None:
     """n_experts of 0, horizon 0 and a bool seed are refused; the seed value is ignored."""
     with pytest.raises(ValueError, match="n_experts"):
-        RidgeStack().init(0, 2, CONFIG, 0)
+        LEARNED[learned_id]().init(0, 2, CONFIGS[learned_id], 0)
     with pytest.raises(ValueError, match="horizon"):
-        RidgeStack().init(3, 0, CONFIG, 0)
+        LEARNED[learned_id]().init(3, 0, CONFIGS[learned_id], 0)
     with pytest.raises(ValueError, match="seed"):
-        RidgeStack().init(3, 2, CONFIG, True)
+        LEARNED[learned_id]().init(3, 2, CONFIGS[learned_id], True)
 
 
 # --- Test 3: uniform first ------------------------------------------------------------------------
 
 
-def test_uniform_before_anything_matures() -> None:
+@pytest.mark.parametrize("learned_id", LEARNED_IDS)
+def test_uniform_before_anything_matures(learned_id: str) -> None:
     """Every call before a Matured is absorbed returns exactly 1 / n per column."""
-    updater = RidgeStack()
-    state = updater.init(4, 3, CONFIG, 0)
+    updater = LEARNED[learned_id]()
+    state = updater.init(4, 3, CONFIGS[learned_id], 0)
     for step in range(5):  # the arena's first `horizon` steps carry empty feedback
         weights, state = updater.update(state, (), step_context(4, 3, step))
         assert weights == tuple(tuple(0.25 for _ in range(3)) for _ in range(4))
@@ -242,11 +287,12 @@ def test_uniform_before_anything_matures() -> None:
 # --- Test 4: valid weights over a long replay -----------------------------------------------------
 
 
-def test_valid_weights_over_a_long_replay() -> None:
+@pytest.mark.parametrize("learned_id", LEARNED_IDS)
+def test_valid_weights_over_a_long_replay(learned_id: str) -> None:
     """400 origins of random data replay without ever leaving the simplex."""
     rows, values = probe_fixture(random.Random(0), 4, 3, 400, worst=3)
-    recorder = Recording(ridge_stack())
-    trace = replay_probe(recorder, rows, values, 4, 3, 400)
+    recorder = Recording(LEARNED[learned_id]())
+    trace = replay_probe(recorder, rows, values, 4, 3, 400, CONFIGS[learned_id])
     assert len(trace.errors) == 400  # replay_series completed: every column passed the check
     assert len(recorder.weights) == 400
     for weights in recorder.weights:
@@ -436,16 +482,17 @@ def test_projection_rejects_bad_input() -> None:
 # --- Test 10: no look-ahead -----------------------------------------------------------------------
 
 
-def test_no_look_ahead() -> None:
+@pytest.mark.parametrize("learned_id", LEARNED_IDS)
+def test_no_look_ahead(learned_id: str) -> None:
     """Targets beyond step k never reach the weights at or before step k."""
     k = 50
     rows, values = probe_fixture(random.Random(7), 4, 3, 120)
     changed = list(values)
     for i in range(k + 1, len(changed)):
         changed[i] = changed[i] + 5.0
-    first, second = Recording(ridge_stack()), Recording(ridge_stack())
-    replay_probe(first, rows, values, 4, 3, 120)
-    replay_probe(second, rows, changed, 4, 3, 120)
+    first, second = Recording(LEARNED[learned_id]()), Recording(LEARNED[learned_id]())
+    replay_probe(first, rows, values, 4, 3, 120, CONFIGS[learned_id])
+    replay_probe(second, rows, changed, 4, 3, 120, CONFIGS[learned_id])
     for step in range(k + 1):
         assert first.weights[step] == second.weights[step]
 
@@ -453,25 +500,33 @@ def test_no_look_ahead() -> None:
 # --- Test 11: determinism and isolation -----------------------------------------------------------
 
 
-def test_two_replays_are_bit_identical() -> None:
+@pytest.mark.parametrize("learned_id", LEARNED_IDS)
+def test_two_replays_are_bit_identical(learned_id: str) -> None:
     """Two replays of the same inputs return identical weights at every step."""
     rows, values = probe_fixture(random.Random(0), 4, 3, 100)
-    first, second = Recording(ridge_stack()), Recording(ridge_stack())
-    replay_probe(first, rows, values, 4, 3, 100)
-    replay_probe(second, rows, values, 4, 3, 100)
+    first, second = Recording(LEARNED[learned_id]()), Recording(LEARNED[learned_id]())
+    replay_probe(first, rows, values, 4, 3, 100, CONFIGS[learned_id])
+    replay_probe(second, rows, values, 4, 3, 100, CONFIGS[learned_id])
     assert first.weights == second.weights
 
 
-def test_state_lives_in_the_state() -> None:
+@pytest.mark.parametrize("learned_id", LEARNED_IDS)
+def test_state_lives_in_the_state(learned_id: str) -> None:
     """Two states of one instance evolve exactly like two separate instances."""
     rng_a, rng_b = random.Random(1), random.Random(2)
     n_experts, horizon, steps = 4, 2, 8
-    shared = RidgeStack()
-    state_a = shared.init(n_experts, horizon, CONFIG, 0)
-    state_b = shared.init(n_experts, horizon, CONFIG, 1)
-    alone_a, alone_b = RidgeStack(), RidgeStack()
-    alone_state_a = alone_a.init(n_experts, horizon, CONFIG, 0)
-    alone_state_b = alone_b.init(n_experts, horizon, CONFIG, 1)
+    config = CONFIGS[learned_id]
+    shared = LEARNED[learned_id]()
+    state_a = shared.init(n_experts, horizon, config, 0)
+    state_b = shared.init(n_experts, horizon, config, 1)
+    alone_a, alone_b = LEARNED[learned_id](), LEARNED[learned_id]()
+    alone_state_a = alone_a.init(n_experts, horizon, config, 0)
+    alone_state_b = alone_b.init(n_experts, horizon, config, 1)
+    # the arena's first call carries empty feedback; loss_gate stores step 0's features there
+    _, state_a = shared.update(state_a, (), step_context(4, 2, 0))
+    _, state_b = shared.update(state_b, (), step_context(4, 2, 0))
+    _, alone_state_a = alone_a.update(alone_state_a, (), step_context(4, 2, 0))
+    _, alone_state_b = alone_b.update(alone_state_b, (), step_context(4, 2, 0))
     for k in range(1, steps + 1):
         series_a = [[rng_a.uniform(-1.0, 1.0) for _ in range(horizon)] for _ in range(n_experts)]
         series_b = [[rng_b.uniform(-1.0, 1.0) for _ in range(horizon)] for _ in range(n_experts)]
@@ -520,15 +575,17 @@ def pooled_env(tmp_path_factory: pytest.TempPathFactory):
     return base, cache_root, foundation_root
 
 
-def test_replays_the_synthetic_pool(synthetic_pool) -> None:
-    """ridge_stack at its default config replays synthetic-dev to ok."""
+@pytest.mark.parametrize("learned_id", LEARNED_IDS)
+def test_replays_the_synthetic_pool(synthetic_pool, learned_id: str) -> None:
+    """Each learned updater at its default config replays synthetic-dev to ok."""
     result = replay_dataset(
-        LEARNED["ridge_stack"], LEARNED_DEFAULT_CONFIGS["ridge_stack"], 0, synthetic_pool
+        LEARNED[learned_id], LEARNED_DEFAULT_CONFIGS[learned_id], 0, synthetic_pool
     )
     assert result.status == "ok"
 
 
-def test_replays_the_pooled_fixture(pooled_env) -> None:
+@pytest.mark.parametrize("learned_id", LEARNED_IDS)
+def test_replays_the_pooled_fixture(pooled_env, learned_id: str) -> None:
     """The same replay over the pooled fake-foundation pool is ok too."""
     base, cache_root, foundation_root = pooled_env
     pool = load_dev_pool(
@@ -540,8 +597,202 @@ def test_replays_the_pooled_fixture(pooled_env) -> None:
         foundation_root=foundation_root,
         foundation_models=("fake",),
     )
-    result = replay_dataset(LEARNED["ridge_stack"], LEARNED_DEFAULT_CONFIGS["ridge_stack"], 0, pool)
+    result = replay_dataset(LEARNED[learned_id], LEARNED_DEFAULT_CONFIGS[learned_id], 0, pool)
     assert result.status == "ok"
+
+
+# --- PR B test 2: an unknown matured step ---------------------------------------------------------
+
+
+class StepRewriter:
+    """Wraps an updater, shifting every Matured's step to one no update call stored."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    def init(self, n_experts: int, horizon: int, config: object, seed: int) -> object:
+        return self.inner.init(n_experts, horizon, config, seed)
+
+    def update(self, state: object, feedback: object, context: object) -> object:
+        shifted = tuple(
+            Matured(
+                step=matured_item.step - 1,
+                errors=matured_item.errors,
+                combined_errors=matured_item.combined_errors,
+            )
+            for matured_item in feedback
+        )
+        return self.inner.update(state, shifted, context)
+
+
+def test_unknown_matured_step_is_refused() -> None:
+    """A Matured whose step no update call of this state returned raises ValueError."""
+    updater = loss_gate()
+    state = updater.init(2, 1, CONFIGS["loss_gate"], 0)
+    _, state = updater.update(state, (), step_context(2, 1, 0))  # stores step 0
+    with pytest.raises(ValueError, match="step 3"):
+        updater.update(state, (matured([[0.2], [-0.4]], 1, step=3),), step_context(2, 1, 1))
+
+
+def test_unknown_step_fails_the_replay() -> None:
+    """Inside replay_series the same refusal stops the series as a failed replay."""
+    rows, values = probe_fixture(random.Random(4), 3, 2, 30)
+    with pytest.raises(UpdaterFailure) as failure:
+        replay_probe(StepRewriter(loss_gate()), rows, values, 3, 2, 30, CONFIGS["loss_gate"])
+    assert failure.value.kind == "failed"
+    assert "ValueError" in failure.value.message
+
+
+# --- PR B test 3: a persistent best ---------------------------------------------------------------
+
+
+def test_persistent_best_gets_the_weight() -> None:
+    """With beta = 64, an expert whose error is always 0.1 against 1.0 reaches 0.9."""
+    config = CONFIGS["loss_gate"] | {"beta": 64.0}
+    steps = [[[1.0, 1.0], [0.1, 0.1], [1.0, 1.0]] for _ in range(200)]
+    weights = drive(LossGate(), config, steps, 3, horizon=2)
+    for h in range(2):
+        assert weights[-1][1][h] >= 0.9
+
+
+# --- PR B test 4: a switch after a regime change -------------------------------------------------
+
+
+def test_switch_after_a_regime_change() -> None:
+    """The best expert changes at origin 500; with half_life = 48 the gate follows it."""
+    config = CONFIGS["loss_gate"] | {"half_life": 48.0}
+    steps = [[[0.1, 0.1], [1.0, 1.0]] for _ in range(500)]
+    steps += [[[1.0, 1.0], [0.1, 0.1]] for _ in range(500)]
+    weights = drive(LossGate(), config, steps, 2, horizon=2)
+    for h in range(2):
+        assert weights[-1][1][h] > 0.5
+
+
+# --- PR B test 5: a seasonal gate -----------------------------------------------------------------
+
+
+def test_seasonal_gate_prefers_the_seasons_best() -> None:
+    """Expert 0 wins only at season-0 origins; its mean weight there exceeds the rest."""
+    updater = loss_gate()
+    state = updater.init(2, 1, CONFIGS["loss_gate"], 0)
+    forecasts = ((0.5,), (1.5,))
+    weights, state = updater.update(state, (), step_context(2, 1, 0, forecasts=forecasts, period=4))
+    season_0, other = [], []
+    for k in range(1, 401):
+        season = (k - 1) % 4
+        errors = [[0.1], [1.0]] if season == 0 else [[1.0], [0.1]]
+        feedback = (matured(errors, 1, step=k - 1),)
+        weights, state = updater.update(
+            state, feedback, step_context(2, 1, k, forecasts=forecasts, period=4)
+        )
+        (season_0 if k % 4 == 0 else other).append(weights[0][0])
+    assert sum(season_0) / len(season_0) > sum(other) / len(other)
+
+
+# --- PR B test 6: training rows use origin-time features -----------------------------------------
+
+
+def test_training_rows_use_origin_time_features() -> None:
+    """G and r after maturity hold the features stored at the origin, not today's."""
+    half_life = 336.0
+    config = CONFIGS["loss_gate"] | {"half_life": half_life, "refit_every": 1}
+    gamma = math.exp(-math.log(2.0) / half_life)
+    updater = loss_gate()
+    state = updater.init(2, 1, config, 0)
+    # origin 0: forecasts (0.0, 2.0) -> mean 1.0, deviations (1.0, 1.0), dev = (1.0, 1.0)
+    _, state = updater.update(state, (), step_context(2, 1, 0, forecasts=((0.0,), (2.0,))))
+    # origin 1 matures origin 0; its own forecasts are constant, so recomputing the
+    # features now would give dev = (0.0, 0.0) instead of the stored (1.0, 1.0)
+    _, state = updater.update(
+        state,
+        (matured([[0.5], [-0.25]], 1, step=0),),
+        step_context(2, 1, 1, forecasts=((1.0,), (1.0,))),
+    )
+    stored_rows = [(1.0, 0.0, 0.0, 0.0, 1.0), (1.0, 0.0, 0.0, 0.0, 1.0)]
+    losses = [1.0, 0.5]  # _loss_column of (0.5, -0.25): abs over the column max 0.5
+    expected_g = [[0.0] * 5 for _ in range(5)]
+    expected_r = [0.0] * 5
+    for row, loss in zip(stored_rows, losses, strict=True):
+        for i in range(5):
+            for j in range(5):
+                expected_g[i][j] = gamma * expected_g[i][j] + row[i] * row[j]
+            expected_r[i] = gamma * expected_r[i] + row[i] * loss
+    assert state.g[0] == expected_g
+    assert state.r[0] == expected_r
+    assert state.m[0] == 2.0
+    late_rows = [(1.0, 0.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0, 0.0)]  # dev = 0 here and now
+    late_g = [[0.0] * 5 for _ in range(5)]
+    for row, _ in zip(late_rows, losses, strict=True):
+        for i in range(5):
+            for j in range(5):
+                late_g[i][j] = gamma * late_g[i][j] + row[i] * row[j]
+    assert late_g != expected_g  # the origin-time and maturity-time designs really differ
+
+
+# --- PR B test 7: the pending bound --------------------------------------------------------------
+
+
+class PendingProbe:
+    """Wraps the updater, recording how large pending ever grew after a call."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+        self.max_pending = 0
+
+    def init(self, n_experts: int, horizon: int, config: object, seed: int) -> object:
+        return self.inner.init(n_experts, horizon, config, seed)
+
+    def update(self, state: object, feedback: object, context: object) -> object:
+        result = self.inner.update(state, feedback, context)
+        self.max_pending = max(self.max_pending, len(result[1].pending))
+        return result
+
+
+def test_pending_never_exceeds_the_horizon() -> None:
+    """Through a whole replay, pending holds at most the horizon's worth of origins."""
+    rows, values = probe_fixture(random.Random(5), 3, 3, 80)
+    probe = PendingProbe(loss_gate())
+    trace = replay_probe(probe, rows, values, 3, 3, 80, CONFIGS["loss_gate"])
+    assert len(trace.errors) == 80
+    assert probe.max_pending <= 3
+
+
+# --- PR B test 8: fallbacks ----------------------------------------------------------------------
+
+
+def test_uniform_until_the_first_matured_origin() -> None:
+    """beta_hat stays None before the first matured origin, so the column is uniform."""
+    updater = loss_gate()
+    state = updater.init(3, 2, CONFIGS["loss_gate"], 0)
+    weights, state = updater.update(state, (), step_context(3, 2, 0))
+    assert state.beta_hat == [None, None]
+    assert weights == tuple(tuple(1.0 / 3 for _ in range(2)) for _ in range(3))
+
+
+def test_singular_refit_keeps_the_previous_coefficients() -> None:
+    """A design whose normalised system is exactly singular keeps the last beta_hat."""
+    config = {"beta": 16.0, "half_life": 8.0, "ridge": 0.5, "refit_every": 1}
+    updater = loss_gate()
+    state = updater.init(2, 1, config, 0)
+    _, state = updater.update(state, (), step_context(2, 1, 0))
+    _, state = updater.update(state, (matured([[0.3], [-0.4]], 1, step=0),), step_context(2, 1, 1))
+    assert state.beta_hat[0] is not None
+    fitted = state.beta_hat[0]
+    assert state.m[0] == 2.0  # exact, so the crafted design below reconstructs exactly
+    singular = [
+        [1.0, 0.0, 0.0, 0.0, 0.0],
+        [0.5, 0.5, 0.5, 0.0, 0.0],
+        [0.5, 0.5, 0.5, 0.0, 0.0],  # a duplicate row: the system cannot have a pivot
+        [0.0, 0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 1.0],
+    ]
+    count, ridge = state.m[0], 0.5
+    state.g[0] = [
+        [count * (singular[i][j] - (ridge if i == j and i > 0 else 0.0)) for j in range(5)]
+        for i in range(5)
+    ]
+    _, state = updater.update(state, (), step_context(2, 1, 2))
+    assert state.beta_hat[0] is fitted  # solve_linear returned None; nothing was replaced
 
 
 # --- AST guards -----------------------------------------------------------------------------------

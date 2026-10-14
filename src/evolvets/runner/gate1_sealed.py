@@ -22,7 +22,7 @@ from types import MappingProxyType
 from typing import cast
 
 from evolvets.arena.versions import protocol_versions
-from evolvets.ledger.blobs import BlobStore
+from evolvets.ledger.blobs import BlobError, BlobStore
 from evolvets.ledger.payloads import RunEnd, RunStart
 from evolvets.ledger.store import LedgerError, LedgerReader
 from evolvets.runner.gate1_grids import select_configs
@@ -65,12 +65,12 @@ class SealedPlan:
     previous_sealed_runs: tuple[str, ...]
 
 
-def _config_of(ledger_root: Path, run_id: str, record: RunStart) -> dict[str, object]:
-    """Return the parsed config blob of one run's ``run_start``."""
+def _config_of(ledger_root: Path, run_id: str, record: RunStart) -> dict[str, object] | None:
+    """The parsed config blob of one run's ``run_start``; ``None`` if not a JSON object."""
     raw = BlobStore(Path(ledger_root) / run_id / "blobs").get(record.config_blob)
     parsed: object = json.loads(raw.decode("utf-8"))
     if not isinstance(parsed, dict):
-        raise RunError(f"run {run_id}: the run_start config blob is not a JSON object")
+        return None
     return cast("dict[str, object]", parsed)
 
 
@@ -142,9 +142,9 @@ def _previous_sealed_runs(ledger_root: Path, tune_run_id: str) -> tuple[str, ...
             if first.payload.condition != SEALED_CONDITION:
                 continue
             config = _config_of(Path(ledger_root), run_id, first.payload)
-        except (LedgerError, OSError, ValueError):
+        except (BlobError, LedgerError, OSError, ValueError):
             continue  # a run that fails to read is skipped
-        if config.get("tune_run_id") != tune_run_id:
+        if config is None or config.get("tune_run_id") != tune_run_id:
             continue
         ended = any(
             isinstance(record.payload, RunEnd) and record.payload.status == "completed"
@@ -173,6 +173,8 @@ def plan_from_tune_run(ledger_root: Path, tune_run_id: str) -> SealedPlan:
     if (root / tune_run_id / "sealed.jsonl").exists():
         raise RunError(f"tune run {tune_run_id} has a sealed stream; a tune run must not")
     records = list(LedgerReader(root, tune_run_id).records(["main"]))
+    if not records:
+        raise RunError(f"tune run {tune_run_id}: the main stream is empty; no run_start")
     first = records[0]
     if first.kind != "run_start" or not isinstance(first.payload, RunStart):
         raise RunError(f"tune run {tune_run_id}: the first record is not a run_start")
@@ -184,6 +186,8 @@ def plan_from_tune_run(ledger_root: Path, tune_run_id: str) -> SealedPlan:
     if start.protocol_versions != protocol_versions():
         raise RunError(f"tune run {tune_run_id} pins different protocol versions than this code")
     config = _config_of(root, tune_run_id, start)
+    if config is None:
+        raise RunError(f"tune run {tune_run_id}: the run_start config blob is not a JSON object")
     if config.get("experiment") != "gate1" or config.get("stage") != "dev-tune":
         raise RunError(
             f"tune run {tune_run_id}: config is not a gate1 dev-tune run "

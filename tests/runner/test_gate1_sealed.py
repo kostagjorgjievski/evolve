@@ -306,6 +306,11 @@ def test_plan_refusals(
     with pytest.raises(RunError, match="no run_end"):
         plan_from_tune_run(hand, "tune-noend")
 
+    (hand / "tune-empty").mkdir()
+    (hand / "tune-empty" / "main.jsonl").touch()
+    with pytest.raises(RunError, match="no run_start"):
+        plan_from_tune_run(hand, "tune-empty")
+
     _hand_tune_run(hand, "tune-wrong", config_bytes, condition="gate1-dev-tune-x", selected={})
     with pytest.raises(RunError, match="condition"):
         plan_from_tune_run(hand, "tune-wrong")
@@ -332,10 +337,17 @@ def test_plan_refusals(
 
 
 def _hand_sealed_run(
-    ledger_root: Path, tune_run_id: str, run_id: str, *, status: str | None = "completed"
+    ledger_root: Path,
+    tune_run_id: str,
+    run_id: str,
+    *,
+    status: str | None = "completed",
+    config_bytes: bytes | None = None,
 ) -> None:
     """Hand-build a sealed run of ``tune_run_id``; only what the plan scan reads."""
     blobs = BlobStore(ledger_root / run_id / "blobs")
+    if config_bytes is None:
+        config_bytes = canonical_bytes({"tune_run_id": tune_run_id})
     with LedgerWriter(ledger_root, run_id, "main") as writer:
         writer.append(
             "run_start",
@@ -343,7 +355,7 @@ def _hand_sealed_run(
                 condition=SEALED_CONDITION,
                 seed=7,
                 requires_predictions=False,
-                config_blob=blobs.put(canonical_bytes({"tune_run_id": tune_run_id})),
+                config_blob=blobs.put(config_bytes),
                 git_commit=COMMIT,
                 protocol_versions=protocol_versions(),
                 budget_limits=Budget(wall_seconds=1.0),
@@ -372,6 +384,17 @@ def test_a_completed_sealed_run_is_refused_and_other_runs_are_skipped_or_remembe
         stream.read_text(encoding="utf-8").replace("gate1-sealed", "gate1-sealeX"),
         encoding="utf-8",
     )
+    plan = plan_from_tune_run(ledger, "tune-8")
+    assert plan.previous_sealed_runs == ()
+
+    # a run whose config blob is missing is skipped, not fatal, even completed
+    _hand_sealed_run(ledger, "tune-8", "sealed-noblobs")
+    shutil.rmtree(ledger / "sealed-noblobs" / "blobs")
+    plan = plan_from_tune_run(ledger, "tune-8")
+    assert plan.previous_sealed_runs == ()
+
+    # a run whose config blob is not a JSON object is skipped, not fatal
+    _hand_sealed_run(ledger, "tune-8", "sealed-notobject", config_bytes=canonical_bytes([1, 2]))
     plan = plan_from_tune_run(ledger, "tune-8")
     assert plan.previous_sealed_runs == ()
 

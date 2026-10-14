@@ -25,6 +25,7 @@ from evolvets.arena.realdata.prepare import (
     read_split_manifest,
     splits_manifest_path,
 )
+from evolvets.arena.sealed.client import SealedPaths
 from evolvets.arena.sealed.names import SEALED_DATASETS
 from evolvets.arena.sealed.pools import (
     build_sealed_cache,
@@ -58,6 +59,7 @@ from evolvets.ledger.store import LedgerLockedError, LedgerReader, LedgerWriter
 from evolvets.ledger.validate import validate_run
 from evolvets.runner.gate1_grids import GATE1_GRIDS
 from evolvets.runner.gate1_report import ReportError, build_report
+from evolvets.runner.gate1_sealed import plan_from_tune_run, sealed_run
 from evolvets.runner.gate1_tune import DevPaths, TuneSpec, tune
 from evolvets.runner.runs import RunError, current_git_commit, new_run_id
 from evolvets.updater.baselines import BASELINE_IDS, BASELINES, DEFAULT_CONFIGS
@@ -421,6 +423,37 @@ def build_parser() -> argparse.ArgumentParser:
     gate1_report_output.add_argument("--out", metavar="PATH", help="write the report to PATH")
     gate1_report_output.add_argument(
         "--check", metavar="PATH", help="compare the regenerated report against PATH"
+    )
+    gate1_sealed_cmd = gate1_sub.add_parser(
+        "sealed",
+        help="evaluate the dev-selected configurations once on the sealed pools, in one run",
+    )
+    gate1_sealed_cmd.add_argument(
+        "--tune-run",
+        metavar="ID",
+        required=True,
+        help="the completed dev tune run whose selection is evaluated on sealed",
+    )
+    gate1_sealed_cmd.add_argument(
+        "--max-wall-seconds",
+        type=float,
+        default=172800.0,
+        help="wall-clock budget of the run in seconds (default: 172800, two days)",
+    )
+    gate1_sealed_cmd.add_argument("--ledger-root", default="ledgers", help="ledger root directory")
+    gate1_sealed_cmd.add_argument(
+        "--run-id", metavar="ID", help="run id (default: a fresh gate1-sealed id)"
+    )
+    gate1_sealed_cmd.add_argument(
+        "--data-root", default="data", help="sealed data root directory (as 'evolvets sealed')"
+    )
+    gate1_sealed_cmd.add_argument(
+        "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+    )
+    gate1_sealed_cmd.add_argument(
+        "--sealed-cache-root",
+        default="data/sealed_cache",
+        help="sealed cache root directory (never the public cache root)",
     )
     return parser
 
@@ -859,6 +892,60 @@ def _check_report(path: str, report: str) -> int:
     return 0
 
 
+def _cmd_gate1_sealed(args: argparse.Namespace) -> int:
+    """Run the sealed evaluation of one tune run's selection; OK plus receipts only.
+
+    The seed is the tune run's, so there is no ``--seed``. A refusal before
+    start (a dirty tree, a plan refusal, a reused run id) is one FAIL line and
+    writes nothing; after start, any exception aborts the run and is reported
+    by run id. The summary holds receipts, never a metric.
+    """
+    try:
+        git_commit = current_git_commit(Path.cwd())
+    except RunError as exc:
+        print(f"FAIL {exc}")
+        return 1
+    ledger_root = Path(args.ledger_root)
+    try:
+        plan = plan_from_tune_run(ledger_root, args.tune_run)
+    except RunError as exc:
+        print(f"FAIL {exc}")
+        return 1
+    paths = SealedPaths(
+        data_root=Path(args.data_root),
+        manifest_dir=Path(args.manifest_dir),
+        sealed_cache_root=Path(args.sealed_cache_root),
+    )
+    run_id = args.run_id if args.run_id is not None else new_run_id("gate1-sealed")
+    main_stream = ledger_root / run_id / "main.jsonl"
+    reused = main_stream.exists()
+    try:
+        status = sealed_run(
+            plan,
+            paths,
+            ledger_root=ledger_root,
+            run_id=run_id,
+            git_commit=git_commit,
+            max_wall_seconds=args.max_wall_seconds,
+        )
+    except Exception as exc:
+        # A run this invocation started and aborted is reported by run id; a
+        # refusal before start (an invalid budget, a reused run id) is not.
+        if main_stream.exists() and not reused:
+            print(f"FAIL {run_id} aborted: {exc}")
+        else:
+            print(f"FAIL {exc}")
+        return 1
+    # main only: the sealed stream's records are the server's, and run_end is
+    # the last record of main.
+    records = list(LedgerReader(ledger_root, run_id).records(["main"]))
+    run_end = records[-1].payload
+    summary = run_end.summary if isinstance(run_end, RunEnd) else {}
+    print(f"OK {run_id} {status}")
+    print(canonical_json(summary))
+    return 0 if status == "completed" else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the EvolveTS CLI."""
     parser = build_parser()
@@ -956,6 +1043,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_gate1_tune(args)
         if args.gate1_command == "report":
             return _cmd_gate1_report(args)
+        if args.gate1_command == "sealed":
+            return _cmd_gate1_sealed(args)
         parser.print_help()
         return 0
     if args.command is None:

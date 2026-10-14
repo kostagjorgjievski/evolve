@@ -1,33 +1,47 @@
-"""Gate 1 on sealed: the plan mapping a completed dev tune run to sealed work.
+"""Gate 1 on sealed: the plan for a dev tune run, and its recorded execution.
 
 :func:`plan_from_tune_run` recomputes a completed dev tune run's selection
 from its own records (verifying them first) and maps every dev pool to its
 sealed counterpart: the oracles of every pool, then one evaluation of every
-dev-selected baseline configuration. The caller stays blind (TASK_008):
-this module imports only the sealed client's names, opens no sealed file,
-salt or cache, and never reads a run's sealed stream. A configuration is
-evaluated on sealed once per tune run: a tune run that already has a
-completed sealed run is refused before anything is written. The recorded
-run that executes the plan (:func:`sealed_run`) lands in the next PR of
-this stack (TASK_012 PR A, ``feat/gate1-sealed-run``).
+dev-selected baseline configuration. :func:`sealed_run` executes that plan
+inside one recorded run whose main stream holds only ``run_start`` and
+``run_end``; every evaluation record is the sealed server's, charged by the
+server and learned by the caller as a receipt alone. The caller stays blind
+(TASK_008): this module imports only the sealed client, opens no sealed
+file, salt or cache, and never reads a run's sealed stream — its own
+monotonic elapsed time is what bounds the run's wall-clock, because the
+sealed budgets are not the caller's to read. A configuration is evaluated
+on sealed once per tune run: a tune run that already has a completed
+sealed run is refused before anything is written.
 """
 
 from __future__ import annotations
 
 import json
+import math
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import cast
 
+from evolvets.arena.sealed.client import (
+    SERIES_TIMEOUT_SECONDS,
+    SealedOracleRequest,
+    SealedPaths,
+    SealedRequest,
+    evaluate_sealed,
+    evaluate_sealed_oracle,
+)
 from evolvets.arena.versions import protocol_versions
 from evolvets.ledger.blobs import BlobError, BlobStore
 from evolvets.ledger.payloads import RunEnd, RunStart
+from evolvets.ledger.schema import Budget
 from evolvets.ledger.store import LedgerError, LedgerReader
 from evolvets.runner.gate1_grids import select_configs
 from evolvets.runner.gate1_tune import TUNE_CONDITION
-from evolvets.runner.runs import RunError
+from evolvets.runner.runs import Run, RunError
 from evolvets.updater.baselines import BASELINE_IDS
 from evolvets.updater.interfaces import ConfigValue
 
@@ -39,6 +53,11 @@ SEALED_DATASET_OF: Mapping[str, str] = MappingProxyType(
         "synthetic-dev": "synthetic-sealed",
     }
 )
+#: The inverse mapping: sealed dataset -> dev dataset.
+_DEV_DATASET_OF: Mapping[str, str] = MappingProxyType(
+    {sealed: dev for dev, sealed in SEALED_DATASET_OF.items()}
+)
+_UPDATER_REF = "evolvets.updater.baselines:"
 
 
 @dataclass(frozen=True)
@@ -258,3 +277,194 @@ def plan_from_tune_run(ledger_root: Path, tune_run_id: str) -> SealedPlan:
         skipped=tuple(skipped),
         previous_sealed_runs=_previous_sealed_runs(root, tune_run_id),
     )
+
+
+def _validate_run(plan: SealedPlan, max_wall_seconds: float) -> None:
+    """Refuse a run that cannot be honoured, before anything is written."""
+    if (
+        isinstance(max_wall_seconds, bool)
+        or not isinstance(max_wall_seconds, (int, float))
+        or not math.isfinite(max_wall_seconds)
+        or max_wall_seconds <= 0
+    ):
+        raise ValueError(f"max_wall_seconds must be a finite number > 0, got {max_wall_seconds!r}")
+    if not plan.items:
+        raise ValueError("the plan has no items; nothing to evaluate on sealed")
+    for item in plan.items:
+        if item.dataset not in _DEV_DATASET_OF:
+            raise ValueError(f"sealed dataset {item.dataset!r} has no dev counterpart")
+
+
+def _run_config(plan: SealedPlan, max_wall_seconds: float) -> dict[str, object]:
+    """Build the sealed run's ``run_start`` config blob from the plan alone.
+
+    Axes keep plan order: datasets and pool specs in the order their oracle
+    items first name them (the plan lists every pool's oracle first), and
+    every baseline of the selection in ``BASELINE_IDS`` order, a ``None``
+    kept for the skipped ones.
+    """
+    sealed_datasets: list[str] = []
+    pool_specs: list[str] = []
+    foundation_models: dict[str, dict[str, list[str]]] = {}
+    picks: dict[tuple[str, str], dict[str, dict[str, ConfigValue] | None]] = {}
+    for dataset, pool_spec, baseline_id in plan.skipped:
+        picks.setdefault((dataset, pool_spec), {})[baseline_id] = None
+    for item in plan.items:
+        if item.updater_id == "oracle":
+            continue
+        picks.setdefault((item.dataset, item.pool_spec), {})[item.updater_id] = dict(item.config)
+    for item in plan.items:
+        if item.dataset not in sealed_datasets:
+            sealed_datasets.append(item.dataset)
+        if item.pool_spec not in pool_specs:
+            pool_specs.append(item.pool_spec)
+        foundation_models.setdefault(item.dataset, {}).setdefault(
+            item.pool_spec,
+            list(item.foundation_models) if item.foundation_models is not None else [],
+        )
+    selected: dict[str, dict[str, dict[str, dict[str, ConfigValue] | None]]] = {}
+    for dataset in sealed_datasets:
+        for pool_spec in pool_specs:
+            bucket = picks.get((dataset, pool_spec), {})
+            ordered = {
+                baseline_id: bucket[baseline_id]
+                for baseline_id in BASELINE_IDS
+                if baseline_id in bucket
+            }
+            if ordered:
+                selected.setdefault(dataset, {})[pool_spec] = ordered
+    planned_ids = {item.updater_id for item in plan.items if item.updater_id != "oracle"}
+    planned_ids.update(entry[2] for entry in plan.skipped)
+    return {
+        "experiment": "gate1",
+        "stage": "sealed",
+        "tune_run_id": plan.tune_run_id,
+        "tune_run_end_record_id": plan.tune_run_end_record_id,
+        "tune_git_commit": plan.tune_git_commit,
+        "datasets": sealed_datasets,
+        "dev_datasets": [_DEV_DATASET_OF[dataset] for dataset in sealed_datasets],
+        "pool_specs": pool_specs,
+        "foundation_models": foundation_models,
+        "selected": selected,
+        "updater_refs": {
+            baseline_id: f"{_UPDATER_REF}{baseline_id}"
+            for baseline_id in BASELINE_IDS
+            if baseline_id in planned_ids
+        },
+        "seed": plan.seed,
+        "max_wall_seconds": max_wall_seconds,
+        "series_timeout_seconds": SERIES_TIMEOUT_SECONDS,
+        "previous_sealed_runs": list(plan.previous_sealed_runs),
+    }
+
+
+def _evaluate_item(
+    item: SealedPlanItem, plan: SealedPlan, paths: SealedPaths, ledger_root: Path, run_id: str
+) -> tuple[str, str]:
+    """Send one item to the sealed server; return its ``(record_id, status)`` receipt."""
+    if item.updater_id == "oracle":
+        receipt = evaluate_sealed_oracle(
+            SealedOracleRequest(
+                dataset=item.dataset,
+                pool_spec=item.pool_spec,
+                foundation_models=item.foundation_models,
+            ),
+            ledger_root=ledger_root,
+            run_id=run_id,
+            paths=paths,
+        )
+    else:
+        receipt = evaluate_sealed(
+            SealedRequest(
+                dataset=item.dataset,
+                updater_id=item.updater_id,
+                updater_ref=f"{_UPDATER_REF}{item.updater_id}",
+                config=dict(item.config),
+                seed=plan.seed,
+                pool_spec=item.pool_spec,
+                foundation_models=item.foundation_models,
+            ),
+            ledger_root=ledger_root,
+            run_id=run_id,
+            paths=paths,
+        )
+    return receipt.record_id, receipt.status
+
+
+def sealed_run(
+    plan: SealedPlan,
+    paths: SealedPaths,
+    *,
+    ledger_root: Path,
+    run_id: str,
+    git_commit: str,
+    max_wall_seconds: float,
+) -> str:
+    """Execute one sealed plan inside a recorded run; return the ``run_end`` status.
+
+    The main stream holds only ``run_start`` and ``run_end``: every evaluation
+    record is the sealed server's, in the sealed stream, and the server is the
+    only budget charge (TASK_008). The caller learns each outcome as a receipt
+    and never reads the sealed stream, so the loop times itself against the
+    monotonic clock — the first item always runs, and the elapsed time is
+    checked only after an item, bounding the sealed charges from above. The
+    status is ``completed`` when every item ran, else ``budget_exhausted``; a
+    ``failed``, ``timeout`` or ``invalid_weights`` updater receipt is a result,
+    and the run continues. Any exception — a :class:`SealedError` refusal or
+    server failure included — aborts the run through the
+    :class:`~evolvets.runner.runs.Run` context and propagates; records the
+    server already wrote stay in the sealed stream.
+    """
+    _validate_run(plan, max_wall_seconds)
+    config = _run_config(plan, max_wall_seconds)
+    limits = Budget(
+        wall_seconds=max_wall_seconds,
+        evaluations=sum(1 for item in plan.items if item.updater_id != "oracle"),
+    )
+    root = Path(ledger_root)
+    with Run.start(
+        root,
+        run_id,
+        condition=SEALED_CONDITION,
+        seed=plan.seed,
+        config=config,
+        budget_limits=limits,
+        git_commit=git_commit,
+    ) as run:
+        started = time.monotonic()
+        receipts: list[dict[str, object]] = []
+        counts: dict[str, int] = {"oracles": 0, "evaluations": 0}
+        statuses: dict[str, int] = {}
+        for index, item in enumerate(plan.items):
+            if index and time.monotonic() - started >= max_wall_seconds:
+                break
+            record_id, receipt_status = _evaluate_item(item, plan, paths, root, run_id)
+            receipts.append(
+                {
+                    "dataset": item.dataset,
+                    "pool_spec": item.pool_spec,
+                    "updater_id": item.updater_id,
+                    "record_id": record_id,
+                    "status": receipt_status,
+                }
+            )
+            if item.updater_id == "oracle":
+                counts["oracles"] += 1
+            else:
+                counts["evaluations"] += 1
+                statuses[receipt_status] = statuses.get(receipt_status, 0) + 1
+        status = "completed" if len(receipts) == len(plan.items) else "budget_exhausted"
+        run.end(
+            status,
+            {
+                "receipts": receipts,
+                "skipped": [
+                    {"dataset": dataset, "pool_spec": pool_spec, "updater_id": baseline_id}
+                    for dataset, pool_spec, baseline_id in plan.skipped
+                ],
+                "oracles": counts["oracles"],
+                "evaluations": counts["evaluations"],
+                "statuses": {key: statuses[key] for key in sorted(statuses)},
+            },
+        )
+    return status

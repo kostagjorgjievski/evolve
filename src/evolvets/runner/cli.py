@@ -58,6 +58,7 @@ from evolvets.ledger.payloads import RunEnd
 from evolvets.ledger.store import LedgerLockedError, LedgerReader, LedgerWriter
 from evolvets.ledger.validate import validate_run
 from evolvets.runner.gate1_grids import GATE1_GRIDS
+from evolvets.runner.gate1_probe import PROBE_GRIDS, ProbeSpec, probe
 from evolvets.runner.gate1_report import ReportError, build_report
 from evolvets.runner.gate1_sealed import plan_from_tune_run, sealed_run
 from evolvets.runner.gate1_tune import DevPaths, TuneSpec, tune
@@ -401,6 +402,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gate1_tune_cmd.add_argument("--data-root", default="data", help="data root directory")
     gate1_tune_cmd.add_argument(
+        "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+    )
+    gate1_probe_cmd = gate1_sub.add_parser(
+        "probe",
+        help="replay the learned updaters' grids over the dev pools of one completed tune run",
+    )
+    gate1_probe_cmd.add_argument(
+        "--tune-run",
+        metavar="ID",
+        required=True,
+        help="the completed dev tune run whose pools the probe replays",
+    )
+    gate1_probe_cmd.add_argument(
+        "--dataset",
+        choices=[*CACHE_DATASETS, "all"],
+        action="append",
+        required=True,
+        help="which dev datasets to probe; repeatable, 'all' expands to every cache dataset",
+    )
+    gate1_probe_cmd.add_argument(
+        "--pool-spec",
+        choices=POOL_SPECS,
+        action="append",
+        required=True,
+        help="which pool specs to replay; repeatable",
+    )
+    gate1_probe_cmd.add_argument(
+        "--foundation-model",
+        nargs="+",
+        metavar="NAME",
+        help="foundation models to join (simple+foundation only; default: the registry)",
+    )
+    gate1_probe_cmd.add_argument("--seed", type=int, default=0, help="updater seed (default: 0)")
+    gate1_probe_cmd.add_argument(
+        "--max-wall-seconds",
+        type=float,
+        default=172800.0,
+        help="wall-clock budget of the run in seconds (default: 172800, two days)",
+    )
+    gate1_probe_cmd.add_argument("--ledger-root", default="ledgers", help="ledger root directory")
+    gate1_probe_cmd.add_argument(
+        "--run-id", metavar="ID", help="run id (default: a fresh gate1-probe id)"
+    )
+    gate1_probe_cmd.add_argument("--cache-root", default="cache_store", help="cache root directory")
+    gate1_probe_cmd.add_argument(
+        "--foundation-root",
+        default=_FOUNDATION_ROOT,
+        help="foundation cache root directory (as 'evolvets foundation build')",
+    )
+    gate1_probe_cmd.add_argument("--data-root", default="data", help="data root directory")
+    gate1_probe_cmd.add_argument(
         "--manifest-dir", default="data/manifests", help="directory holding the manifests"
     )
     gate1_report_cmd = gate1_sub.add_parser(
@@ -791,8 +843,8 @@ def _cmd_arena_oracle(args: argparse.Namespace) -> int:
     return 0
 
 
-def _gate1_tune_spec(args: argparse.Namespace) -> TuneSpec:
-    """Build the TuneSpec from the CLI arguments, first-seen order, duplicates dropped."""
+def _gate1_axes(args: argparse.Namespace) -> tuple[list[str], list[str]]:
+    """Expand the repeatable --dataset / --pool-spec arguments: first-seen order, no duplicates."""
     datasets: list[str] = []
     for name in args.dataset:
         for dataset in CACHE_DATASETS if name == "all" else (name,):
@@ -802,7 +854,26 @@ def _gate1_tune_spec(args: argparse.Namespace) -> TuneSpec:
     for pool_spec in args.pool_spec:
         if pool_spec not in pool_specs:
             pool_specs.append(pool_spec)
+    return datasets, pool_specs
+
+
+def _gate1_tune_spec(args: argparse.Namespace) -> TuneSpec:
+    """Build the TuneSpec from the CLI arguments, first-seen order, duplicates dropped."""
+    datasets, pool_specs = _gate1_axes(args)
     return TuneSpec(
+        datasets=tuple(datasets),
+        pool_specs=tuple(pool_specs),
+        foundation_models=tuple(args.foundation_model) if args.foundation_model else None,
+        seed=args.seed,
+        max_wall_seconds=args.max_wall_seconds,
+    )
+
+
+def _gate1_probe_spec(args: argparse.Namespace) -> ProbeSpec:
+    """Build the ProbeSpec from the CLI arguments, first-seen order, duplicates dropped."""
+    datasets, pool_specs = _gate1_axes(args)
+    return ProbeSpec(
+        tune_run_id=args.tune_run,
         datasets=tuple(datasets),
         pool_specs=tuple(pool_specs),
         foundation_models=tuple(args.foundation_model) if args.foundation_model else None,
@@ -841,6 +912,50 @@ def _cmd_gate1_tune(args: argparse.Namespace) -> int:
     except Exception as exc:
         # A run this invocation started and aborted is reported by run id; a
         # refusal before start (bad spec, unloadable pool, reused run id) is not.
+        if main_stream.exists() and not reused:
+            print(f"FAIL {run_id} aborted: {exc}")
+        else:
+            print(f"FAIL {exc}")
+        return 1
+    records = list(LedgerReader(ledger_root, run_id).records())
+    run_end = records[-1].payload
+    summary = run_end.summary if isinstance(run_end, RunEnd) else {}
+    print(f"OK {run_id} {status}")
+    print(canonical_json(summary))
+    return 0 if status == "completed" else 2
+
+
+def _cmd_gate1_probe(args: argparse.Namespace) -> int:
+    """Run the learned-updater probe in one recorded run; OK plus the ledger's own summary."""
+    try:
+        git_commit = current_git_commit(Path.cwd())
+    except RunError as exc:
+        print(f"FAIL {exc}")
+        return 1
+    spec = _gate1_probe_spec(args)
+    paths = DevPaths(
+        cache_root=Path(args.cache_root),
+        foundation_root=Path(args.foundation_root),
+        data_root=Path(args.data_root),
+        manifest_dir=Path(args.manifest_dir),
+    )
+    run_id = args.run_id if args.run_id is not None else new_run_id("gate1-probe")
+    ledger_root = Path(args.ledger_root)
+    main_stream = ledger_root / run_id / "main.jsonl"
+    reused = main_stream.exists()
+    try:
+        status = probe(
+            spec,
+            paths,
+            ledger_root=ledger_root,
+            run_id=run_id,
+            git_commit=git_commit,
+            grids=PROBE_GRIDS,
+        )
+    except Exception as exc:
+        # A run this invocation started and aborted is reported by run id; a
+        # refusal before start (bad spec, unusable tune run, unloadable pool,
+        # reused run id) is not.
         if main_stream.exists() and not reused:
             print(f"FAIL {run_id} aborted: {exc}")
         else:
@@ -1041,6 +1156,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "gate1":
         if args.gate1_command == "tune":
             return _cmd_gate1_tune(args)
+        if args.gate1_command == "probe":
+            return _cmd_gate1_probe(args)
         if args.gate1_command == "report":
             return _cmd_gate1_report(args)
         if args.gate1_command == "sealed":

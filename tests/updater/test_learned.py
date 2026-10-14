@@ -729,6 +729,26 @@ def test_training_rows_use_origin_time_features() -> None:
     assert late_g != expected_g  # the origin-time and maturity-time designs really differ
 
 
+# --- PR B: the discounted design ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("n_experts", [2, 5])
+def test_discounted_design_is_a_discounted_mean(n_experts: int) -> None:
+    """G, r and m discount once per origin, so the intercept entry equals the count."""
+    updater = loss_gate()
+    state = updater.init(n_experts, 1, CONFIGS["loss_gate"], 0)
+    errors = [[0.25] for _ in range(n_experts)]  # constant errors fix every feature
+    _, state = updater.update(state, (), step_context(n_experts, 1, 0))
+    for k in range(1, 3001):
+        _, state = updater.update(
+            state, (matured(errors, 1, step=k - 1),), step_context(n_experts, 1, k)
+        )
+        # each origin adds n intercept rows of 1.0 * 1.0 and n to m, with one
+        # discount between origins: G[0][0] and m stay equal whatever n is
+        assert abs(state.g[0][0][0] - state.m[0]) <= 1e-9
+        assert abs(state.g[0][0][0] / state.m[0] - 1.0) <= 1e-9
+
+
 # --- PR B test 7: the pending bound --------------------------------------------------------------
 
 

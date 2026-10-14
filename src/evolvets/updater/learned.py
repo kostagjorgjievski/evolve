@@ -334,7 +334,7 @@ class _LossGateState:
     season_last: list[list[dict[int, float]]]  # [h][e] season index -> last matured loss
     g: list[list[list[float]]]  # [h][i][j] discounted sum of x x^T
     r: list[list[float]]  # [h][i] discounted sum of x * l
-    m: list[float]  # [h] discounted count of absorbed expert-rows
+    m: list[float]  # [h] discounted count of design rows (n per origin, one discount per origin)
     beta_hat: list[list[float] | None]  # [h] the fitted coefficients
     pending: dict[int, tuple[int, _Features]]  # step -> (season index, features)
     absorbed: int  # matured origins seen
@@ -404,7 +404,10 @@ def _absorb_origin(state: _LossGateState, matured: Matured) -> None:
 
     The design rows are the ones stored at the origin (``pending``), not
     anything recomputed now; an origin the state never forecast raises, which
-    the arena records as a failed replay.
+    the arena records as a failed replay. ``G``, ``r`` and ``m`` take one
+    discount per origin — the same cadence as ``ridge_stack`` — and then every
+    expert's row of that origin, so ``G / m`` stays a discounted mean of the
+    design whatever the pool size.
     """
     stored = state.pending.pop(matured.step, None)
     if stored is None:
@@ -415,6 +418,11 @@ def _absorb_origin(state: _LossGateState, matured: Matured) -> None:
     for h in range(state.horizon):
         losses = loss_columns[h]
         gram, rhs = state.g[h], state.r[h]
+        for i in range(_N_FEATURES):
+            gram_row = gram[i]
+            for j in range(_N_FEATURES):
+                gram_row[j] = state.gamma * gram_row[j]
+            rhs[i] = state.gamma * rhs[i]
         for e in range(n_experts):
             row = features[h][e]
             loss = losses[e]
@@ -422,8 +430,8 @@ def _absorb_origin(state: _LossGateState, matured: Matured) -> None:
                 value = row[i]
                 gram_row = gram[i]
                 for j in range(_N_FEATURES):
-                    gram_row[j] = state.gamma * gram_row[j] + value * row[j]
-                rhs[i] = state.gamma * rhs[i] + value * loss
+                    gram_row[j] = gram_row[j] + value * row[j]
+                rhs[i] = rhs[i] + value * loss
         state.m[h] = state.gamma * state.m[h] + n_experts
     for h in range(state.horizon):
         losses = loss_columns[h]

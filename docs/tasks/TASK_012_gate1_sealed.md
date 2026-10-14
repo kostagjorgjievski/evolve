@@ -72,7 +72,9 @@ class SealedPlan:
     tune_git_commit: str
     seed: int  # the tune run's seed
     items: tuple[SealedPlanItem, ...]  # all oracles first, then baselines (order below)
-    skipped: tuple[tuple[str, str, str], ...]  # (sealed dataset, pool_spec, baseline id) with selection None
+    skipped: tuple[
+        tuple[str, str, str], ...
+    ]  # (sealed dataset, pool_spec, baseline id) with selection None
     previous_sealed_runs: tuple[str, ...]
 
 
@@ -203,7 +205,9 @@ class SealedPoolSection:
     dev_best: str | None  # chosen on dev MASE (TASK_011 rule)
     gaps: tuple[GapRow, ...] | None  # vs dev_best; None if dev_best is None or not ok on sealed
     sealed_best: str | None  # lowest sealed MASE among ok rows; ties to BASELINE_IDS order
-    hindsight_gaps: tuple[GapRow, ...] | None  # vs sealed_best; None if it equals dev_best or is None
+    hindsight_gaps: (
+        tuple[GapRow, ...] | None
+    )  # vs sealed_best; None if it equals dev_best or is None
     family_gaps: tuple[FamilyGaps, ...]  # synthetic-sealed only, vs dev_best
 ```
 

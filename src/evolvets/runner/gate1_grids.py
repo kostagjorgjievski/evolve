@@ -64,15 +64,22 @@ class _Pick:
     record_id: str
 
 
-def select_configs(records: Sequence[Record], read_blob: Callable[[str], object]) -> Selection:
-    """Select each (dataset, pool spec, baseline)'s tuned configuration from one run's records.
+def select_configs(
+    records: Sequence[Record],
+    read_blob: Callable[[str], object],
+    *,
+    updater_ids: Sequence[str] = BASELINE_IDS,
+) -> Selection:
+    """Select each (dataset, pool spec, updater)'s tuned configuration from one run's records.
 
     Only main-stream dev ``baseline`` records with an updater id in
-    ``BASELINE_IDS`` are considered; each record's blob ``result`` names the
-    dataset and pool spec it belongs to (a failed result's blob carries them
-    too). Among the ``ok`` records the lowest ``metrics["mase"]`` wins, an
-    exact tie goes to the earlier record, and a triple with no ``ok`` record
-    selects ``None``. Entries appear in first-seen order.
+    ``updater_ids`` — the baselines' ids by default, the learned ids
+    (``LEARNED_IDS``) for a probe run (TASK_014 PR C) — are considered; each
+    record's blob ``result`` names the dataset and pool spec it belongs to
+    (a failed result's blob carries them too). Among the ``ok`` records the
+    lowest ``metrics["mase"]`` wins, an exact tie goes to the earlier
+    record, and a triple with no ``ok`` record selects ``None``. Entries
+    appear in first-seen order.
     """
     picks: dict[str, dict[str, dict[str, _Pick | None]]] = {}
     for record in records:
@@ -81,7 +88,7 @@ def select_configs(records: Sequence[Record], read_blob: Callable[[str], object]
         payload = record.payload
         if not isinstance(payload, Baseline):
             continue
-        if payload.pool != "dev" or payload.updater_id not in BASELINE_IDS:
+        if payload.pool != "dev" or payload.updater_id not in updater_ids:
             continue
         if payload.per_task_blob is None:
             continue

@@ -233,10 +233,19 @@ def _record_replay(
     config: Mapping[str, ConfigValue],
     seed: int,
     counts: dict[str, int],
+    *,
+    factories: Mapping[str, Callable[[], Updater]] = BASELINES,
+    ref_prefix: str = _UPDATER_REF,
 ) -> None:
-    """Replay one grid configuration over one pool and append its baseline record."""
+    """Replay one grid configuration over one pool and append its baseline record.
+
+    ``factories`` names the updater factories by id and ``ref_prefix`` the
+    module prefix of the blob's ``updater_ref``: the baselines and their
+    prefix by default, the learned updaters and ``evolvets.updater.learned:``
+    for the probe (TASK_014 PR C).
+    """
     started = time.monotonic()
-    timed = _TimedFactory(BASELINES[baseline_id])
+    timed = _TimedFactory(factories[baseline_id])
     result = replay_dataset(timed, config, seed, pool)
     ended = time.monotonic()
     run.append(
@@ -249,7 +258,7 @@ def _record_replay(
             metrics=dict(result.metrics),
             per_task_blob=run.put_blob(
                 {
-                    "updater_ref": f"{_UPDATER_REF}{baseline_id}",
+                    "updater_ref": f"{ref_prefix}{baseline_id}",
                     "series_wall_seconds": timed.series_wall_seconds(ended),
                     "result": result_to_obj(result),
                 }
@@ -287,7 +296,12 @@ def _tune_loop(
                 for config in grids[baseline_id]:
                     if run.spent.wall_seconds >= spec.max_wall_seconds:
                         return
-                    _record_replay(run, pool, baseline_id, config, spec.seed, counts)
+                    # The module mapping, read here at call time (not the
+                    # default, bound at import): a test that patches
+                    # ``gate1_tune.BASELINES`` still reaches the replay.
+                    _record_replay(
+                        run, pool, baseline_id, config, spec.seed, counts, factories=BASELINES
+                    )
 
 
 def _select_this_run(ledger_root: Path, run_id: str) -> Selection:

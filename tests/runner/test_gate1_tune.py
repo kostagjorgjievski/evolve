@@ -42,9 +42,10 @@ from evolvets.runner.gate1_tune import (
     planned_replays,
     tune,
 )
-from evolvets.runner.runs import RunError
+from evolvets.runner.runs import Run, RunError
 from evolvets.updater.baselines import BASELINES, hedge
 from evolvets.updater.interfaces import ConfigValue
+from evolvets.updater.learned import LEARNED
 from tests.arena.test_realdata_prepare import _record_opens
 
 COMMIT = "b" * 40
@@ -654,3 +655,52 @@ def test_cli_tune_rejects_an_unknown_dataset() -> None:
     """argparse rejects a dataset outside CACHE_DATASETS + 'all'."""
     with pytest.raises(SystemExit):
         cli.main(["gate1", "tune", "--dataset", "nope", "--pool-spec", "simple"])
+
+
+# --- TASK_014 PR C refactor: the replay recorder serves the learned updaters too ------------------
+
+
+def test_record_replay_factories_and_ref_prefix(
+    synthetic_env: dict[str, Path], tmp_path: Path
+) -> None:
+    """_record_replay records any factory mapping and ref prefix, not just the baselines'."""
+    ledger = tmp_path / "ledgers"
+    pool = dev_pool_of(synthetic_env)
+    config: dict[str, ConfigValue] = {"half_life": 48.0, "shrink": 0.1, "refit_every": 24}
+    counts = {"replays": 0, "ok": 0, "failed": 0, "invalid_weights": 0}
+    with Run.start(
+        ledger,
+        "replay-run",
+        condition=TUNE_CONDITION,
+        seed=3,
+        config={},
+        budget_limits=Budget(wall_seconds=100.0, evaluations=1),
+        git_commit=COMMIT,
+    ) as run:
+        gate1_tune._record_replay(
+            run,
+            pool,
+            "ridge_stack",
+            config,
+            3,
+            counts,
+            factories=LEARNED,
+            ref_prefix="evolvets.updater.learned:",
+        )
+        run.end("completed", {})
+    records = read_records(ledger, "replay-run")
+    payload = records[1].payload
+    assert isinstance(payload, Baseline)
+    expected = replay_dataset(LEARNED["ridge_stack"], config, 3, pool)
+    assert (payload.updater_id, payload.hyperparams, payload.status) == (
+        "ridge_stack",
+        dict(config),
+        expected.status,
+    )
+    assert payload.metrics == expected.metrics
+    blob = blob_reader(ledger, "replay-run")(payload.per_task_blob)
+    assert isinstance(blob, dict)
+    assert blob["updater_ref"] == "evolvets.updater.learned:ridge_stack"
+    assert blob["result"] == result_to_obj(expected)
+    assert counts["replays"] == 1
+    assert counts[expected.status] == 1

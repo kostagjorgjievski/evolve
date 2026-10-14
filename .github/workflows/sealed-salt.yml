@@ -1,0 +1,68 @@
+name: Sealed salt (W1, create once)
+
+# Creates the sealed synthetic salt on the lab node's persistent volume and
+# prints its manifest (hashes only). Owner-only, manual dispatch only. The salt
+# is never a GitHub secret, is never printed, and is never uploaded.
+# Re-dispatching is safe: init-salt is a no-op on a matching salt and refuses
+# every other case without changing a file (TASK_008, TASK_012).
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: sealed-salt
+  cancel-in-progress: false
+
+jobs:
+  salt:
+    if: github.actor == github.repository_owner
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+    env:
+      UV_INDEX_URL: ${{ vars.GPU_PIP_INDEX_URL }}
+      UV_PYTHON_PREFERENCE: only-system
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - name: Get code (git only, no tarball fallback)
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          find . -mindepth 1 -delete
+          git init -q .
+          timeout 120 git -c "http.extraheader=AUTHORIZATION: bearer ${TOKEN}" \
+            -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+            fetch -q --depth 1 --no-tags "https://github.com/${REPO}.git" "${SHA}"
+          git checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "${SHA}"
+      - name: Paths
+        run: |
+          set -euo pipefail
+          umask 077
+          base="${EVOLVETS_DATA:-/data}/evolve"
+          mkdir -p "$base"
+          install -d -m 700 "$base/sealed" "$base/sealed/data" "$base/sealed/cache"
+          {
+            echo "SEALED_DATA=$base/sealed/data"
+            echo "VENV=$base/venv-dev"
+          } >> "$GITHUB_ENV"
+      - name: Python environment from uv.lock
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bash .github/scripts/run-logged.sh "python env" bash .github/scripts/gpu-env.sh dev "$VENV"
+      - name: Create the salt (20 worlds per family)
+        run: |
+          umask 077
+          export PATH="$HOME/.local/bin:$PATH"
+          bash .github/scripts/run-logged.sh "init-salt" "$VENV/bin/evolvets" sealed init-salt \
+            --per-family 20 --data-root "$SEALED_DATA" --manifest-dir data/manifests
+      - name: Check the salt file mode
+        run: |
+          mode="$(stat -c '%a' "$SEALED_DATA/sealed/synthetic.salt")"
+          echo "salt mode: $mode"
+          test "$mode" = "600"
+      - name: Print the manifest (salt sha256, per_family, versions only)
+        run: cat data/manifests/synthetic-sealed.yaml

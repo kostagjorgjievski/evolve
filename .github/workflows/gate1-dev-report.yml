@@ -108,6 +108,11 @@ jobs:
             --bootstrap-seed "${{ inputs.bootstrap_seed }}" --out out/gate1-dev-report.md
           wc -l out/gate1-dev-report.md
           cat out/gate1-dev-report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the report as a notice annotation (dev numbers only)
+        run: |
+          msg="$(cat out/gate1-dev-report.md)"
+          msg="${msg//'%'/'%25'}"; msg="${msg//$'\r'/'%0D'}"; msg="${msg//$'\n'/'%0A'}"
+          echo "::notice title=gate1-dev-report::${msg}"
       - name: Upload the report (dev numbers only)
         uses: actions/upload-artifact@v4
         with:

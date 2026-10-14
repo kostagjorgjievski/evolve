@@ -83,9 +83,11 @@ module = [
     # TASK_011: every new runner module joins the strict list (PR A: runs;
     # PR B: gate1_grids, gate1_tune; PR C1: gate1_report_data; PR C2: gate1_report).
     # TASK_012 PR A: gate1_sealed (split: plan first, run next).
+    # TASK_014 PR C: gate1_probe.
     "evolvets.runner.runs",
     "evolvets.runner.gate1_grids",
     "evolvets.runner.gate1_tune",
+    "evolvets.runner.gate1_probe",
     "evolvets.runner.gate1_report_data",
     "evolvets.runner.gate1_report",
     "evolvets.runner.gate1_sealed",

@@ -78,15 +78,15 @@ The finding is one of these two. The report computes each verdict mechanically:
 
 ```python
 LEARNED_IDS: tuple[str, ...] = ("ridge_stack",)  # PR B appends "loss_gate"
-LEARNED_DEFAULT_CONFIGS: Mapping[str, Mapping[str, ConfigValue]]  # MappingProxyType, as DEFAULT_CONFIGS
+LEARNED_DEFAULT_CONFIGS: Mapping[
+    str, Mapping[str, ConfigValue]
+]  # MappingProxyType, as DEFAULT_CONFIGS
 # ridge_stack: {"half_life": 336.0, "shrink": 1.0, "refit_every": 24}
 LEARNED: Mapping[str, Callable[[], Updater]]  # id -> zero-argument factory, LEARNED_IDS order
 
 
 def project_to_simplex(values: Sequence[float]) -> list[float]: ...
-def solve_linear(
-    matrix: Sequence[Sequence[float]], rhs: Sequence[float]
-) -> list[float] | None: ...
+def solve_linear(matrix: Sequence[Sequence[float]], rhs: Sequence[float]) -> list[float] | None: ...
 
 
 class RidgeStack:  # init / update per the Updater protocol
@@ -444,7 +444,9 @@ class ProbeSection:
     best_baseline: str | None  # None when no baseline has an ok config on this pool
     best_baseline_mase: float | None
     learned: tuple[TunedRow, ...]  # LEARNED_IDS order, as _tuned_rows builds them
-    gains: tuple[GainRow, ...]  # one per learned updater with a selection; () if best_baseline is None
+    gains: tuple[
+        GainRow, ...
+    ]  # one per learned updater with a selection; () if best_baseline is None
 
 
 @dataclass(frozen=True)

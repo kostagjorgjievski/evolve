@@ -1,0 +1,104 @@
+name: Gate 1 dev report
+
+# Builds the dev report from a completed tune run's ledger on the lab node and
+# publishes it (dev numbers only: no sealed data is involved) as the job summary
+# and an artifact. Also checks that the run's recorded git commit is a real
+# commit of this repository, as the sealed plan requires (TASK_012).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tune_run_id:
+        description: Tune run id (empty = the newest run in the ledger directory)
+        default: ""
+      bootstrap_seed:
+        description: Bootstrap seed
+        default: "0"
+
+concurrency:
+  group: gate1-dev-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    if: github.actor == github.repository_owner
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+    env:
+      UV_INDEX_URL: ${{ vars.GPU_PIP_INDEX_URL }}
+      UV_PYTHON_PREFERENCE: only-system
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - name: Get code
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          find . -mindepth 1 -delete
+          git init -q .
+          timeout 120 git -c "http.extraheader=AUTHORIZATION: bearer ${TOKEN}" \
+            -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+            fetch -q --depth 1 --no-tags "https://github.com/${REPO}.git" "${SHA}"
+          git checkout -q FETCH_HEAD
+      - name: Paths
+        run: |
+          set -euo pipefail
+          base="${EVOLVETS_DATA:-/data}/evolve"
+          {
+            echo "LEDGER_ROOT=$base/ledgers"
+            echo "VENV=$base/venv-dev"
+          } >> "$GITHUB_ENV"
+      - name: Python environment from uv.lock
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bash .github/scripts/run-logged.sh "python env" bash .github/scripts/gpu-env.sh dev "$VENV"
+      - name: Pick the run and check its commit
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_INPUT: ${{ inputs.tune_run_id }}
+        run: |
+          set -euo pipefail
+          run_id="$RUN_INPUT"
+          if [ -z "$run_id" ]; then
+            run_id="$(ls -1t "$LEDGER_ROOT" | grep '^gate1-tune-' | head -1)"
+          fi
+          test -n "$run_id"
+          echo "RUN_ID=$run_id" >> "$GITHUB_ENV"
+          echo "tune run: $run_id"
+          commit="$("$VENV/bin/python" -I - "$LEDGER_ROOT/$run_id/main.jsonl" <<'PY'
+          import json, re, sys
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              first = handle.readline()
+          found = re.findall(r'"git_commit"\s*:\s*"([0-9a-f]{40})"', first)
+          print(found[0] if found else "")
+          PY
+          )"
+          echo "recorded git commit: ${commit:-NOT FOUND}"
+          test -n "$commit"
+          status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 \
+            -H "Authorization: Bearer ${TOKEN}" \
+            "https://api.github.com/repos/${REPO}/commits/${commit}" || true)"
+          echo "commit lookup on GitHub: HTTP $status"
+          if [ "$status" = "200" ]; then
+            echo "COMMIT_OK: the recorded commit exists in the repository"
+          else
+            echo "::warning title=tarball commit?::The recorded commit is not a commit of this repository. The tune run may need a redo from a git checkout before the sealed run."
+          fi
+      - name: Build the report
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          mkdir -p out
+          bash .github/scripts/run-logged.sh "gate1 report" "$VENV/bin/evolvets" gate1 report \
+            --ledger-root "$LEDGER_ROOT" --run "$RUN_ID" \
+            --bootstrap-seed "${{ inputs.bootstrap_seed }}" --out out/gate1-dev-report.md
+          wc -l out/gate1-dev-report.md
+          cat out/gate1-dev-report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the report (dev numbers only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate1-dev-report
+          path: out/gate1-dev-report.md
+          retention-days: 90

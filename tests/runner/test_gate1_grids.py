@@ -26,6 +26,7 @@ from evolvets.runner.gate1_grids import (
     select_configs,
 )
 from evolvets.updater.baselines import BASELINE_IDS, BASELINES, DEFAULT_CONFIGS
+from evolvets.updater.learned import LEARNED_IDS
 
 
 def blob_reader(root: Path, run_id: str) -> Callable[[str], object]:
@@ -125,3 +126,20 @@ def test_select_configs_rules(tmp_path: Path) -> None:
     assert pick["mase"] == 1.1
     assert pick["record_id"] == records[1].record_id
     assert simple["ftl"] is None
+
+
+def test_select_configs_updater_ids_filter(tmp_path: Path) -> None:
+    """The updater_ids filter narrows the rule; learned ids select nothing here (TASK_014)."""
+    root = tmp_path / "ledgers"
+    records = _write_hand_built(root)
+    read = blob_reader(root, "hand-run")
+    selection = select_configs(records, read, updater_ids=("hedge",))
+    simple = selection["synthetic-dev"]["simple"]
+    assert list(simple) == ["hedge"]  # ftl drops out, not just loses to hedge
+    pick = simple["hedge"]
+    assert pick is not None
+    assert pick["config"] == {"eta": 1.0}
+    assert pick["record_id"] == records[1].record_id
+    # The tune-side half of TASK_014's test 8: over a tune run's records —
+    # baseline ids only — the learned filter selects nothing.
+    assert select_configs(records, read, updater_ids=LEARNED_IDS) == {}

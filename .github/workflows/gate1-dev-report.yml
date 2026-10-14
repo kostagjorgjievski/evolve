@@ -108,11 +108,24 @@ jobs:
             --bootstrap-seed "${{ inputs.bootstrap_seed }}" --out out/gate1-dev-report.md
           wc -l out/gate1-dev-report.md
           cat out/gate1-dev-report.md >> "$GITHUB_STEP_SUMMARY"
-      - name: Publish the report as a notice annotation (dev numbers only)
+      - name: Publish the report as notice annotations (dev numbers only)
         run: |
-          msg="$(cat out/gate1-dev-report.md)"
-          msg="${msg//'%'/'%25'}"; msg="${msg//$'\r'/'%0D'}"; msg="${msg//$'\n'/'%0A'}"
-          echo "::notice title=gate1-dev-report::${msg}"
+          # annotations are length-limited, so publish the report in numbered chunks
+          "$VENV/bin/python" -I - out/gate1-dev-report.md <<'PY'
+          import sys
+          from urllib.parse import quote
+          text = open(sys.argv[1], encoding="utf-8").read()
+          chunks, current = [], ""
+          for line in text.splitlines(keepends=True):
+              if len(current) + len(line) > 3000 and current:
+                  chunks.append(current)
+                  current = ""
+              current += line
+          chunks.append(current)
+          for number, chunk in enumerate(chunks, 1):
+              body = chunk.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::notice title=gate1-dev-report {number:02d}/{len(chunks):02d}::{body}")
+          PY
       - name: Upload the report (dev numbers only)
         uses: actions/upload-artifact@v4
         with:

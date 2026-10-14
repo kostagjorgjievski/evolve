@@ -29,7 +29,7 @@ Goal: answer question 1 and have every piece of measurement infrastructure froze
 | 8 | `feat/arena-replay` | Replay loop, horizon-aware label release, metrics | TASK_007 |
 | 9 | `feat/arena-sealed` | Sealed/live pools in a separate process; scores written straight to the sealed ledger stream | merged (#43, #46, #51, #54) |
 | 10 | `feat/updater-baselines` | Equal, FTL, Hedge, Fixed-Share, AdaHedge updaters; oracles (interface: entry 8) | merged (#79, #81, #82) |
-| 11 | `exp/gate1` | Tuning on dev, sealed evaluation, Gate 1 report regenerable from the ledger | TASK_011 (dev, PRs #85, #86, #87, #91, #92); TASK_012 (sealed; owner decisions on #94) |
+| 11 | `exp/gate1` | Tuning on dev, sealed evaluation, Gate 1 report regenerable from the ledger | dev half done: TASK_011 (#85, #86, #87, #91, #92); first results in `docs/results/gate1-dev-first-run.md`; sealed half (TASK_012) superseded by the owner on 2026-10-14 (faithful and reproducible results only) |
 
 **Gate 1 decision:** if headroom over the best tuned baseline is small, harden the generator (PR 5) before Phase 1.
 

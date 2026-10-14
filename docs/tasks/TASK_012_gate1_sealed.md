@@ -1,4 +1,6 @@
-Status: active
+Status: superseded
+
+(Superseded 2026-10-14 by the owner: results need only be faithful and reproducible. The sealed ceremony is dropped for now; PR A (#97, #100) stays merged. See docs/results/gate1-dev-first-run.md.)
 
 # Task 012: Gate 1 on sealed: the sealed run, sealed report sections and the lab workflows
 

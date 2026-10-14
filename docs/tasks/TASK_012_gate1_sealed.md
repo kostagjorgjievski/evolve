@@ -1,4 +1,4 @@
-Status: active
+Status: superseded (PR A merged as #100; PRs B and C, with amendments, and the W3 amendment carried into TASK_013 after the dev tune redo of issue #105)
 
 # Task 012: Gate 1 on sealed: the sealed run, sealed report sections and the lab workflows
 

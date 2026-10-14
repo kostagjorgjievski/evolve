@@ -694,35 +694,58 @@ def test_seasonal_gate_prefers_the_seasons_best() -> None:
 
 def test_training_rows_use_origin_time_features() -> None:
     """G and r after maturity hold the features stored at the origin, not today's."""
-    half_life = 336.0
+    half_life = 8.0
     config = CONFIGS["loss_gate"] | {"half_life": half_life, "refit_every": 1}
     gamma = math.exp(-math.log(2.0) / half_life)
     updater = loss_gate()
     state = updater.init(2, 1, config, 0)
-    # origin 0: forecasts (0.0, 2.0) -> mean 1.0, deviations (1.0, 1.0), dev = (1.0, 1.0)
+    # origin 0: forecasts (0.0, 2.0) -> mean 1.0, deviations (1.0, 1.0), dev = (1.0, 1.0);
+    # nothing has matured, so fast, slow and season are all 0.0
     _, state = updater.update(state, (), step_context(2, 1, 0, forecasts=((0.0,), (2.0,))))
-    # origin 1 matures origin 0; its own forecasts are constant, so recomputing the
-    # features now would give dev = (0.0, 0.0) instead of the stored (1.0, 1.0)
+    # origin 1 matures origin 0 and stores its own rows: its forecasts are constant, so
+    # recomputing origin 0's features now would give dev = (0.0, 0.0), not the stored
+    # (1.0, 1.0), and its rows see the EWMAs origin 0's losses set (season falls back
+    # to slow: origin 1's season index was never seen yet)
     _, state = updater.update(
         state,
         (matured([[0.5], [-0.25]], 1, step=0),),
         step_context(2, 1, 1, forecasts=((1.0,), (1.0,))),
     )
-    stored_rows = [(1.0, 0.0, 0.0, 0.0, 1.0), (1.0, 0.0, 0.0, 0.0, 1.0)]
-    losses = [1.0, 0.5]  # _loss_column of (0.5, -0.25): abs over the column max 0.5
+    # origin 2 matures origin 1: a second origin, so G and r are discounted with a
+    # non-zero history behind them
+    _, state = updater.update(
+        state,
+        (matured([[0.2], [0.4]], 1, step=1),),
+        step_context(2, 1, 2, forecasts=((1.0,), (1.0,))),
+    )
+    origin0_rows = [(1.0, 0.0, 0.0, 0.0, 1.0), (1.0, 0.0, 0.0, 0.0, 1.0)]
+    origin0_losses = [1.0, 0.5]  # _loss_column of (0.5, -0.25): abs over the column max 0.5
+    origin1_rows = [(1.0, 1.0, 1.0, 1.0, 0.0), (1.0, 0.5, 0.5, 0.5, 0.0)]
+    origin1_losses = [0.5, 1.0]  # _loss_column of (0.2, 0.4)
     expected_g = [[0.0] * 5 for _ in range(5)]
     expected_r = [0.0] * 5
-    for row, loss in zip(stored_rows, losses, strict=True):
+    expected_m = 0.0
+    # one discount per origin, then every expert's row of that origin
+    for rows, losses in ((origin0_rows, origin0_losses), (origin1_rows, origin1_losses)):
         for i in range(5):
             for j in range(5):
-                expected_g[i][j] = gamma * expected_g[i][j] + row[i] * row[j]
-            expected_r[i] = gamma * expected_r[i] + row[i] * loss
-    assert state.g[0] == expected_g
-    assert state.r[0] == expected_r
-    assert state.m[0] == 2.0
-    late_rows = [(1.0, 0.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0, 0.0)]  # dev = 0 here and now
+                gram_sum = 0.0
+                for row in rows:
+                    gram_sum = gram_sum + row[i] * row[j]
+                expected_g[i][j] = gamma * expected_g[i][j] + gram_sum
+            rhs_sum = 0.0
+            for row, loss in zip(rows, losses, strict=True):
+                rhs_sum = rhs_sum + row[i] * loss
+            expected_r[i] = gamma * expected_r[i] + rhs_sum
+        expected_m = gamma * expected_m + 2.0
+    assert state.m[0] == pytest.approx(expected_m, abs=1e-12)
+    for i in range(5):
+        assert state.r[0][i] == pytest.approx(expected_r[i], abs=1e-12)
+        for j in range(5):
+            assert state.g[0][i][j] == pytest.approx(expected_g[i][j], abs=1e-12)
+    late_rows = [(1.0, 1.0, 1.0, 1.0, 0.0), (1.0, 0.5, 0.5, 0.5, 0.0)]  # origin 0, recomputed now
     late_g = [[0.0] * 5 for _ in range(5)]
-    for row, _ in zip(late_rows, losses, strict=True):
+    for row, _ in zip(late_rows, origin0_losses, strict=True):
         for i in range(5):
             for j in range(5):
                 late_g[i][j] = gamma * late_g[i][j] + row[i] * row[j]

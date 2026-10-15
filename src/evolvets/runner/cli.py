@@ -58,6 +58,7 @@ from evolvets.ledger.payloads import RunEnd
 from evolvets.ledger.store import LedgerLockedError, LedgerReader, LedgerWriter
 from evolvets.ledger.validate import validate_run
 from evolvets.runner.gate1_grids import GATE1_GRIDS
+from evolvets.runner.gate1_headroom import build_headroom_data, render_headroom
 from evolvets.runner.gate1_probe import PROBE_GRIDS, ProbeSpec, probe
 from evolvets.runner.gate1_report import ReportError, build_report
 from evolvets.runner.gate1_sealed import plan_from_tune_run, sealed_run
@@ -482,6 +483,31 @@ def build_parser() -> argparse.ArgumentParser:
     gate1_report_output = gate1_report_cmd.add_mutually_exclusive_group(required=True)
     gate1_report_output.add_argument("--out", metavar="PATH", help="write the report to PATH")
     gate1_report_output.add_argument(
+        "--check", metavar="PATH", help="compare the regenerated report against PATH"
+    )
+    gate1_headroom_cmd = gate1_sub.add_parser(
+        "headroom",
+        help="rank the named tune runs' pools by headroom over their best tuned baseline",
+    )
+    gate1_headroom_cmd.add_argument(
+        "--ledger-root", default="ledgers", help="ledger root directory (contains <run_id>/)"
+    )
+    gate1_headroom_cmd.add_argument(
+        "--run",
+        metavar="ID",
+        action="append",
+        required=True,
+        help="tune run id to scan; repeatable, in report order",
+    )
+    gate1_headroom_cmd.add_argument(
+        "--bootstrap-seed",
+        type=int,
+        default=0,
+        help="seed of the headroom intervals' paired bootstrap",
+    )
+    gate1_headroom_output = gate1_headroom_cmd.add_mutually_exclusive_group(required=True)
+    gate1_headroom_output.add_argument("--out", metavar="PATH", help="write the report to PATH")
+    gate1_headroom_output.add_argument(
         "--check", metavar="PATH", help="compare the regenerated report against PATH"
     )
     gate1_sealed_cmd = gate1_sub.add_parser(
@@ -977,6 +1003,19 @@ def _cmd_gate1_probe(args: argparse.Namespace) -> int:
     return 0 if status == "completed" else 2
 
 
+def _write_or_check(args: argparse.Namespace, report: str) -> int:
+    """Write the built report to ``--out``, or compare it against ``--check``'s file.
+
+    The report reaches here already built, so a refusal never wrote anything;
+    ``--check`` reports the first differing line.
+    """
+    if args.out is not None:
+        Path(args.out).write_text(report, encoding="utf-8")
+        print(f"OK wrote {args.out}")
+        return 0
+    return _check_report(args.check, report)
+
+
 def _cmd_gate1_report(args: argparse.Namespace) -> int:
     """Build the dev report from the ledger, then write it or check a copy.
 
@@ -994,11 +1033,28 @@ def _cmd_gate1_report(args: argparse.Namespace) -> int:
     except ReportError as exc:
         print(f"FAIL {exc}")
         return 1
-    if args.out is not None:
-        Path(args.out).write_text(report, encoding="utf-8")
-        print(f"OK wrote {args.out}")
-        return 0
-    return _check_report(args.check, report)
+    return _write_or_check(args, report)
+
+
+def _cmd_gate1_headroom(args: argparse.Namespace) -> int:
+    """Build the headroom scan from the ledger, then write it or check a copy.
+
+    As ``gate1 report``: the scan is built before anything is written, so a
+    refusal leaves ``--out`` unwritten; ``--check`` reports the first
+    differing line.
+    """
+    try:
+        report = render_headroom(
+            build_headroom_data(
+                Path(args.ledger_root), args.run, bootstrap_seed=args.bootstrap_seed
+            ),
+            args.run,
+            bootstrap_seed=args.bootstrap_seed,
+        )
+    except ReportError as exc:
+        print(f"FAIL {exc}")
+        return 1
+    return _write_or_check(args, report)
 
 
 def _check_report(path: str, report: str) -> int:
@@ -1174,6 +1230,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_gate1_probe(args)
         if args.gate1_command == "report":
             return _cmd_gate1_report(args)
+        if args.gate1_command == "headroom":
+            return _cmd_gate1_headroom(args)
         if args.gate1_command == "sealed":
             return _cmd_gate1_sealed(args)
         parser.print_help()

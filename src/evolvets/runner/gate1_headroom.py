@@ -17,8 +17,11 @@ only, where every series carries ``oracle_mase`` — the true-best forecast.
 Sections are ranked by the lower end of the switch-8 headroom interval,
 separately for leakage-risk and other pools, ties broken by the headroom
 itself; a pool whose every baseline failed has no best baseline, so it is
-listed among the unranked and never ranked. Nothing here formats Markdown
-or parses a command line; that is the rendering half's job.
+listed among the unranked and never ranked. :func:`render_headroom` (PR B's
+rendering half) turns that data into the fixed Markdown layout — the ranked
+tables with the per-pool detail behind them — borrowing the Gate 1 report's
+float and table formatting so the two reports cannot drift. The command line
+around both halves lives in ``runner.cli``, as the report's does.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from evolvets.runner.gate1_report import _VERSION_KEYS, _fmt, _table
 from evolvets.runner.gate1_report_data import (
     _INTERVAL_HIGH_INDEX,
     _INTERVAL_LOW_INDEX,
@@ -304,3 +308,189 @@ def build_headroom_data(
         leakage_ranked=_rank([section for section in with_rows if section.leakage_risk]),
         unranked=tuple(section for section in sections if not section.rows),
     )
+
+
+# --- the rendering (PR B's second half) -----------------------------------------------------------
+
+
+#: The Notes sentences, fixed: what headroom is and how its intervals are
+#: drawn, where the numbers were computed, what the oracles do and do not
+#: bound, what the cost columns count, and how the ranking sorts. The first
+#: line's minus sign is U+2212, as TASK_015 writes it (escaped for RUF001).
+_NOTES = (
+    "- Headroom is (best tuned baseline MASE \u2212 target MASE) / best tuned baseline MASE "
+    "over the pool's series; positive means the target is better. Intervals are paired "
+    "bootstrap intervals over series (2000 resamples) of the same ratio.",
+    "- The baselines were tuned, and the targets computed, on these same dev series.",
+    "- The switching oracles and the best expert per series select single experts in hindsight: "
+    "no online updater can reach them, and they do not bound weighted combinations.",
+    "- Replay seconds is the wall-clock of one evaluation (one replay of the selected "
+    "configuration over every series of the pool); tune seconds is the whole grid.",
+    "- Pools are ranked by the lower end of the switch-8 headroom interval; there is no "
+    "multiple-comparison correction.",
+)
+
+#: The ranked tables' columns: the pool's identity, the best tuned baseline
+#: and its MASE, one headroom column per target with the switch-8 row's
+#: interval beside it (the ranking's key), and the two cost columns.
+_RANKED_HEADER = (
+    "rank",
+    "dataset",
+    "pool",
+    "series",
+    "best tuned baseline",
+    "baseline MASE",
+    "switch-8 headroom",
+    "95% interval",
+    "switch-32 headroom",
+    "best-per-series headroom",
+    "true-best headroom",
+    "replay seconds",
+    "tune seconds",
+)
+
+
+def _interval(row: HeadroomRow) -> str:
+    """The interval cell: ``n/a`` with a single series, there being nothing to draw."""
+    if row.lower is None or row.upper is None:
+        return "n/a"
+    return f"[{_fmt(row.lower)}, {_fmt(row.upper)}]"
+
+
+def _row_of(section: HeadroomSection, target: str) -> HeadroomRow | None:
+    """One section's row for a target, or ``None`` where the pool carries no such row."""
+    for row in section.rows:
+        if row.target == target:
+            return row
+    return None
+
+
+def _runs_table(data: HeadroomData) -> list[str]:
+    """The Runs table: every named run, complete or not, with its violations."""
+    return _table(
+        ("run id", "condition", "status", "git commit", "records", "validate_run"),
+        [
+            (
+                row.run_id,
+                row.condition,
+                row.status,
+                row.git_commit,
+                str(row.records),
+                "; ".join(row.violations) if row.violations else "none",
+            )
+            for row in data.run_rows
+        ],
+    )
+
+
+def _ranked_table(sections: Sequence[HeadroomSection]) -> list[str]:
+    """One ranked table: each section's row, one headroom column per target.
+
+    The interval beside the switch-8 headroom is that row's — the bound the
+    ranking sorts by. A section is in a ranked list only by carrying rows, so
+    its best baseline and its always-present targets exist; the true-best row
+    is the one a real pool lacks, and renders as ``n/a``.
+    """
+    rows: list[tuple[str, ...]] = []
+    for rank, section in enumerate(sections, start=1):
+        assert section.best_baseline is not None  # a ranked section carried rows
+        assert section.best_baseline_mase is not None
+        assert section.replay_wall_seconds is not None  # its selected record exists
+        switch8 = _row_of(section, "switch_mase_m8")
+        switch32 = _row_of(section, "switch_mase_m32")
+        best_per_series = _row_of(section, "best expert per series")
+        true_best = _row_of(section, "true-best forecast")
+        assert switch8 is not None and switch32 is not None and best_per_series is not None
+        rows.append(
+            (
+                str(rank),
+                section.dataset,
+                section.pool_spec,
+                str(section.series),
+                section.best_baseline,
+                _fmt(section.best_baseline_mase),
+                _fmt(switch8.headroom),
+                _interval(switch8),
+                _fmt(switch32.headroom),
+                _fmt(best_per_series.headroom),
+                "n/a" if true_best is None else _fmt(true_best.headroom),
+                _fmt(section.replay_wall_seconds),
+                _fmt(section.tune_wall_seconds),
+            )
+        )
+    return _table(_RANKED_HEADER, rows)
+
+
+def _pool_detail(section: HeadroomSection) -> list[str]:
+    """One pool's subsection of the per-pool detail: its best baseline and every row."""
+    assert section.best_baseline is not None  # only sections with rows are detailed
+    assert section.best_baseline_mase is not None
+    heading = f"### {section.dataset}, pool {section.pool_spec}"
+    if section.leakage_risk:
+        heading += " (leakage risk)"
+    return [
+        heading,
+        "",
+        f"Best tuned baseline: {section.best_baseline} "
+        f"(dev MASE {_fmt(section.best_baseline_mase)}), run {section.run_id}",
+        "",
+        *_table(
+            ("target", "target MASE", "gap", "headroom", "95% interval"),
+            [
+                (
+                    row.target,
+                    _fmt(row.target_mase),
+                    _fmt(row.gap),
+                    _fmt(row.headroom),
+                    _interval(row),
+                )
+                for row in section.rows
+            ],
+        ),
+        "",
+    ]
+
+
+def render_headroom(data: HeadroomData, run_ids: Sequence[str], *, bootstrap_seed: int) -> str:
+    """Render the headroom scan of already-built data as fixed Markdown.
+
+    The layout is fixed: the generating command (run ids and bootstrap seed
+    only, so the output depends on nothing else), the Runs table, the protocol
+    versions, the ranked table (and the leakage-risk one, the heading and
+    table only when such a section exists), the pools without a tuned
+    baseline (only when there are any), the per-pool detail — ranked sections
+    first, then leakage-risk ones, both in rank order — and the fixed Notes.
+    """
+    runs = " ".join(f"--run {run_id}" for run_id in run_ids)
+    command = f"evolvets gate1 headroom {runs} --bootstrap-seed {bootstrap_seed}"
+    lines = [
+        "# Headroom scan (dev)",
+        "",
+        f"generated by `{command}`",
+        "",
+        "## Runs",
+        "",
+    ]
+    lines.extend(_runs_table(data))
+    lines.extend(["", "## Protocol versions", ""])
+    lines.extend(
+        _table(
+            ("protocol", "version"), [(key, data.protocol_versions[key]) for key in _VERSION_KEYS]
+        )
+    )
+    lines.extend(["", "## Ranked headroom", ""])
+    lines.extend(_ranked_table(data.ranked))
+    if data.leakage_ranked:
+        lines.extend(["", "## Ranked headroom, leakage-risk pools", ""])
+        lines.extend(_ranked_table(data.leakage_ranked))
+    if data.unranked:
+        lines.extend(["", "## Pools without a tuned baseline", ""])
+        lines.extend(
+            f"- {section.dataset}, pool {section.pool_spec} (run {section.run_id})"
+            for section in data.unranked
+        )
+    lines.extend(["", "## Per-pool detail", ""])
+    for section in (*data.ranked, *data.leakage_ranked):
+        lines.extend(_pool_detail(section))
+    lines.extend(["## Notes", "", *_NOTES, ""])
+    return "\n".join(lines)

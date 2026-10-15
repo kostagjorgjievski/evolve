@@ -29,7 +29,7 @@ from typing import cast
 from evolvets.arena.dev import DevPool
 from evolvets.arena.pool import POOL_SPECS
 from evolvets.arena.versions import protocol_versions
-from evolvets.cache.datasets import CACHE_DATASETS
+from evolvets.cache.datasets import DEV_DATASETS
 from evolvets.ledger.blobs import BlobStore
 from evolvets.ledger.payloads import RunEnd, RunStart
 from evolvets.ledger.schema import Budget
@@ -80,7 +80,7 @@ class ProbeSpec:
     """What the probe replays, in run order, and the budget it may spend."""
 
     tune_run_id: str
-    datasets: tuple[str, ...]  # each in CACHE_DATASETS, no duplicates, in run order
+    datasets: tuple[str, ...]  # each in DEV_DATASETS, no duplicates, in run order
     pool_specs: tuple[str, ...]  # each in POOL_SPECS, no duplicates, in run order
     foundation_models: tuple[str, ...] | None  # None: the registry's built models
     seed: int
@@ -114,8 +114,8 @@ def _validate_spec(
     if len(set(spec.datasets)) != len(spec.datasets):
         raise ValueError(f"datasets must not repeat: {list(spec.datasets)}")
     for dataset in spec.datasets:
-        if dataset not in CACHE_DATASETS:
-            raise ValueError(f"unknown dataset {dataset!r}; expected one of {list(CACHE_DATASETS)}")
+        if dataset not in DEV_DATASETS:
+            raise ValueError(f"unknown dataset {dataset!r}; expected one of {list(DEV_DATASETS)}")
     if not spec.pool_specs:
         raise ValueError("pool_specs must name at least one pool spec")
     if len(set(spec.pool_specs)) != len(spec.pool_specs):

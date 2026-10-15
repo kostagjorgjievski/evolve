@@ -101,10 +101,39 @@ def test_build_synthetic_dev_needs_per_family(
     assert capsys.readouterr().out.splitlines() == out
 
 
+def test_build_then_verify_synthetic_shift1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A scan preset builds and verifies like synthetic-dev: one OK line, same again."""
+    cache_root = tmp_path / "cache_store"
+    assert (
+        cli.main(
+            [
+                "cache",
+                "build",
+                "synthetic-shift1",
+                "--cache-root",
+                str(cache_root),
+                "--per-family",
+                "1",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out.splitlines()
+    match = _OK_LINE.match(out[0])
+    assert match is not None, out[0]
+    assert match.group(1, 2, 3) == ("synthetic-shift1", "5", str(5 * (2000 - _START)))  # 5 families
+
+    assert cli.main(["cache", "verify", "synthetic-shift1", "--cache-root", str(cache_root)]) == 0
+    assert capsys.readouterr().out.splitlines() == out
+
+
 def test_unknown_dataset_is_rejected_by_argparse() -> None:
     for argv in (
         ["cache", "build", "nope"],
         ["cache", "verify", "nope"],
+        ["cache", "build", "synthetic-shift9"],
     ):
         with pytest.raises(SystemExit) as excinfo:
             cli.main(argv)

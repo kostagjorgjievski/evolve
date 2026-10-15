@@ -12,7 +12,7 @@ unchanged, so a replay cannot tell a sealed pool from a dev pool apart from
 its boundaries; the type names are historical.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -22,8 +22,9 @@ from evolvets.arena.realdata.prepare import PrepareError, load_public
 from evolvets.arena.synthetic import GENERATOR_VERSION
 from evolvets.arena.synthetic.grammar import FAMILIES, GrammarConfig, SyntheticTask
 from evolvets.arena.synthetic.oracle import true_best_forecast
+from evolvets.arena.synthetic.presets import SCAN_DATASETS, SCAN_PRESETS, preset_sha256, scan_tasks
 from evolvets.arena.synthetic.seeds import dev_tasks
-from evolvets.cache.datasets import CACHE_DATASETS
+from evolvets.cache.datasets import DEV_DATASETS
 from evolvets.cache.interfaces import CachedSeries, CacheManifest
 from evolvets.cache.store import CacheError, cache_id, read_manifest
 from evolvets.ledger.canonical import canonical_bytes, sha256_hex
@@ -51,7 +52,7 @@ class DevSeries:
 class DevPool:
     """A cache plus the public series to replay over, in cache manifest order."""
 
-    dataset: str  # one of CACHE_DATASETS (dev) or SEALED_DATASETS (sealed)
+    dataset: str  # one of DEV_DATASETS (dev) or SEALED_DATASETS (sealed)
     cache_root: Path
     cache_id: str
     manifest: CacheManifest
@@ -80,8 +81,8 @@ def load_dev_pool(
     that does not join — surfaces as :class:`ArenaError`, so no caller needs
     to know the cache's and the real-data layer's own error types.
     """
-    if dataset not in CACHE_DATASETS:
-        raise ArenaError(f"unknown dataset {dataset!r}; expected one of {list(CACHE_DATASETS)}")
+    if dataset not in DEV_DATASETS:
+        raise ArenaError(f"unknown dataset {dataset!r}; expected one of {list(DEV_DATASETS)}")
     spec = check_pool_spec(pool_spec)
     if spec == "simple" and (foundation_root is not None or foundation_models is not None):
         raise ArenaError("pool_spec 'simple' takes no foundation caches")
@@ -99,8 +100,12 @@ def load_dev_pool(
         )
     if dataset in ("etth1", "ecl"):
         series = _real_series(dataset, manifest, data_root, manifest_dir)
-    else:
+    elif dataset == "synthetic-dev":
         series = _synthetic_series(manifest)
+    elif dataset in SCAN_DATASETS:
+        series = _scan_series(manifest)
+    else:  # unreachable: every DEV_DATASETS entry is dispatched above
+        raise ArenaError(f"unknown dataset {dataset!r}; expected one of {list(DEV_DATASETS)}")
     return DevPool(
         dataset=dataset,
         cache_root=Path(cache_root),
@@ -153,23 +158,34 @@ def _real_series(
     return tuple(out)
 
 
-def _synthetic_series(manifest: CacheManifest) -> tuple[DevSeries, ...]:
-    """Build the synthetic dev series: worlds, change points and the oracle."""
-    source = manifest.source
+def _check_generator_version(dataset: str, source: Mapping[str, str]) -> None:
+    """Refuse a synthetic cache whose source pins another generator version."""
     if source.get("generator_version") != GENERATOR_VERSION:
         raise ArenaError(
-            f"{manifest.dataset}: cache generator_version "
+            f"{dataset}: cache generator_version "
             f"{source.get('generator_version')!r} != current {GENERATOR_VERSION!r}; unknown "
             "generator versions are refused, not reinterpreted"
         )
+
+
+def _source_per_family(dataset: str, source: Mapping[str, str]) -> int:
+    """Read ``source["per_family"]`` as an int >= 1, else refuse."""
     try:
         per_family = int(source["per_family"])
     except (KeyError, ValueError) as exc:
         raise ArenaError(
-            f"{manifest.dataset}: source.per_family must be an int written as a string: {exc}"
+            f"{dataset}: source.per_family must be an int written as a string: {exc}"
         ) from exc
     if per_family < 1:
-        raise ArenaError(f"{manifest.dataset}: source.per_family must be >= 1, got {per_family}")
+        raise ArenaError(f"{dataset}: source.per_family must be >= 1, got {per_family}")
+    return per_family
+
+
+def _synthetic_series(manifest: CacheManifest) -> tuple[DevSeries, ...]:
+    """Build the synthetic dev series: worlds, change points and the oracle."""
+    source = manifest.source
+    _check_generator_version(manifest.dataset, source)
+    per_family = _source_per_family(manifest.dataset, source)
     expected: list[tuple[str, SyntheticTask]] = []
     for family in FAMILIES:
         for index, task in enumerate(dev_tasks(family, per_family)):
@@ -178,6 +194,46 @@ def _synthetic_series(manifest: CacheManifest) -> tuple[DevSeries, ...]:
         raise ArenaError(
             f"{manifest.dataset}: {per_family} series per family is {len(expected)} series, "
             f"but the cache holds {len(manifest.series)}"
+        )
+    return checked_synthetic_series(manifest, expected)
+
+
+def _scan_series(manifest: CacheManifest) -> tuple[DevSeries, ...]:
+    """Build one scan preset's series: worlds, change points and the oracle.
+
+    The cache must have been built from the very preset this module pins
+    today — same name, same ``preset_sha256``, current generator — so a
+    preset edited after the cache was built is refused, not reinterpreted
+    (TASK_015's rule: the presets were fixed before any scan ran).
+    """
+    source = manifest.source
+    preset = SCAN_PRESETS[manifest.dataset]
+    if source.get("pool") != "scan":
+        raise ArenaError(
+            f"{manifest.dataset}: source.pool must be 'scan' for a scan dataset, got "
+            f"{source.get('pool')!r}"
+        )
+    if source.get("preset") != manifest.dataset:
+        raise ArenaError(
+            f"{manifest.dataset}: source.preset names {source.get('preset')!r}, not the "
+            "dataset being loaded"
+        )
+    if source.get("preset_sha256") != preset_sha256(preset):
+        raise ArenaError(
+            f"{manifest.dataset}: cache preset_sha256 {source.get('preset_sha256')!r} != "
+            f"current {preset_sha256(preset)!r}; a preset edited after the cache was built "
+            "is refused, not reinterpreted"
+        )
+    _check_generator_version(manifest.dataset, source)
+    per_family = _source_per_family(manifest.dataset, source)
+    expected: list[tuple[str, SyntheticTask]] = []
+    for family in preset.families:
+        for index, task in enumerate(scan_tasks(preset.name, family, per_family)):
+            expected.append((f"{family}/{index}", task))
+    if len(expected) != len(manifest.series):
+        raise ArenaError(
+            f"{manifest.dataset}: {per_family} series over each of {len(preset.families)} "
+            f"families is {len(expected)} series, but the cache holds {len(manifest.series)}"
         )
     return checked_synthetic_series(manifest, expected)
 

@@ -1,10 +1,11 @@
 """CLI tests for ``evolvets arena``: dev replays and oracles (TASK_010 PR C, test 8).
 
-Both commands are dev only: the dataset choices are the cache datasets, so a
-sealed name never reaches the pool loader, and neither command takes a sealed
-path or a ledger path. One canonical-JSON line per run, with the per-series
-detail stripped; an ``ArenaError`` is a FAIL line and exit 1, while a failed
-updater is a result like any other and exits 0.
+Both commands are dev only: the dataset choices are the dev datasets (the
+cache datasets plus the scan presets, TASK_015), so a sealed name never
+reaches the pool loader, and neither command takes a sealed path or a ledger
+path. One canonical-JSON line per run, with the per-series detail stripped; an
+``ArenaError`` is a FAIL line and exit 1, while a failed updater is a result
+like any other and exits 0.
 """
 
 from __future__ import annotations
@@ -145,3 +146,30 @@ def test_a_missing_cache_fails_cleanly(tmp_path: Path, capsys: pytest.CaptureFix
     assert code == 1
     out = capsys.readouterr().out.splitlines()
     assert len(out) == 1 and out[0].startswith("FAIL synthetic-dev: ")
+
+
+def test_oracle_over_a_scan_dataset(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """``arena oracle`` over a scan preset succeeds (TASK_015 PR A, test 12)."""
+    cache_root = tmp_path / "cache_store"
+    source, series = public_inputs("synthetic-shift3", tmp_path, tmp_path, per_family=1)
+    build_cache("synthetic-shift3", source, series, cache_root)
+    code = cli.main(
+        [
+            "arena",
+            "oracle",
+            "synthetic-shift3",
+            "--cache-root",
+            str(cache_root),
+            "--data-root",
+            str(tmp_path),
+            "--manifest-dir",
+            str(tmp_path),
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 1, out
+    payload = json.loads(out[0])
+    assert set(payload) == {"result", "wall_seconds"}
+    assert payload["result"]["dataset"] == "synthetic-shift3"
+    assert "series" not in payload["result"]

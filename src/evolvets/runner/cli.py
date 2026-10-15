@@ -33,7 +33,7 @@ from evolvets.arena.sealed.pools import (
     init_salt,
     synthetic_manifest_path,
 )
-from evolvets.cache.datasets import CACHE_DATASETS, public_inputs
+from evolvets.cache.datasets import CACHE_DATASETS, DEV_DATASETS, public_inputs
 from evolvets.cache.store import (
     DEFAULT_HORIZON,
     CacheError,
@@ -116,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         command = cache_sub.add_parser(name, help=help_text)
         command.add_argument(
-            "dataset", choices=[*CACHE_DATASETS, "all"], help="which dataset (or 'all')"
+            "dataset", choices=[*DEV_DATASETS, "all"], help="which dataset (or 'all')"
         )
         command.add_argument("--cache-root", default="cache_store", help="cache root directory")
         command.add_argument("--data-root", default="data", help="data root directory")
@@ -133,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument(
                 "--per-family",
                 type=int,
-                help="synthetic tasks per family; required for synthetic-dev (and 'all')",
+                help="synthetic tasks per family; required for synthetic datasets",
             )
 
     foundation = subparsers.add_parser(
@@ -147,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     foundation_build.add_argument(
         "--dataset",
-        choices=CACHE_DATASETS,
+        choices=DEV_DATASETS,
         required=True,
         help="which dataset (one model per build)",
     )
@@ -177,13 +177,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="adapter device; auto uses CUDA when available",
     )
     foundation_build.add_argument(
-        "--per-family", type=int, help="synthetic tasks per family; required for synthetic-dev"
+        "--per-family", type=int, help="synthetic tasks per family; required for synthetic datasets"
     )
     foundation_verify = foundation_sub.add_parser(
         "verify", help="check an existing cache against its manifest"
     )
     foundation_verify.add_argument(
-        "--dataset", choices=CACHE_DATASETS, required=True, help="which dataset"
+        "--dataset", choices=DEV_DATASETS, required=True, help="which dataset"
     )
     foundation_verify.add_argument(
         "--model",
@@ -199,7 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="recompute a seeded sample of origins and report the drift (diagnostic, read-only)",
     )
     foundation_compare.add_argument(
-        "--dataset", choices=CACHE_DATASETS, required=True, help="which dataset"
+        "--dataset", choices=DEV_DATASETS, required=True, help="which dataset"
     )
     foundation_compare.add_argument(
         "--model",
@@ -317,7 +317,7 @@ def build_parser() -> argparse.ArgumentParser:
     for command in (arena_replay, arena_oracle):
         command.add_argument(
             "dataset",
-            choices=CACHE_DATASETS,
+            choices=DEV_DATASETS,
             help="which dev dataset (sealed pools are served by the sealed server)",
         )
         command.add_argument(
@@ -365,10 +365,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gate1_tune_cmd.add_argument(
         "--dataset",
-        choices=[*CACHE_DATASETS, "all"],
+        choices=[*DEV_DATASETS, "all"],
         action="append",
         required=True,
-        help="which dev datasets to tune; repeatable, 'all' expands to every cache dataset",
+        help="which dev datasets to tune; repeatable, 'all' expands to etth1, ecl and "
+        "synthetic-dev",
     )
     gate1_tune_cmd.add_argument(
         "--pool-spec",
@@ -416,10 +417,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gate1_probe_cmd.add_argument(
         "--dataset",
-        choices=[*CACHE_DATASETS, "all"],
+        choices=[*DEV_DATASETS, "all"],
         action="append",
         required=True,
-        help="which dev datasets to probe; repeatable, 'all' expands to every cache dataset",
+        help="which dev datasets to probe; repeatable, 'all' expands to etth1, ecl and "
+        "synthetic-dev",
     )
     gate1_probe_cmd.add_argument(
         "--pool-spec",

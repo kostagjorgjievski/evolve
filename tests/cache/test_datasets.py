@@ -23,9 +23,15 @@ from evolvets.arena.realdata.prepare import (
 )
 from evolvets.arena.synthetic import GENERATOR_VERSION
 from evolvets.arena.synthetic.grammar import FAMILIES
+from evolvets.arena.synthetic.presets import (
+    SCAN_DATASETS,
+    SCAN_PRESETS,
+    preset_sha256,
+    scan_tasks,
+)
 from evolvets.arena.synthetic.seeds import dev_tasks
 from evolvets.cache import datasets as datasets_module
-from evolvets.cache.datasets import CACHE_DATASETS, public_inputs
+from evolvets.cache.datasets import CACHE_DATASETS, DEV_DATASETS, public_inputs
 from evolvets.cache.store import CacheError
 from tests.arena.test_realdata_prepare import (
     _build_etth1_fixture,
@@ -112,6 +118,37 @@ def test_synthetic_inputs_reject_a_missing_or_small_per_family(per_family: objec
         public_inputs("synthetic-dev", Path("data"), Path("data/manifests"), per_family=per_family)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("dataset", SCAN_DATASETS)
+def test_scan_inputs(dataset: str) -> None:
+    """Each preset yields its families' scan worlds and a source pinned to the preset."""
+    preset = SCAN_PRESETS[dataset]
+    source, series = public_inputs(dataset, Path("data"), Path("data/manifests"), per_family=2)
+    assert source == {
+        "kind": "synthetic",
+        "pool": "scan",
+        "preset": preset.name,
+        "preset_sha256": preset_sha256(preset),
+        "generator_version": GENERATOR_VERSION,
+        "per_family": "2",
+    }
+    expected_ids = [f"{family}/{i}" for family in preset.families for i in range(2)]
+    assert [entry.series_id for entry in series] == expected_ids  # the preset's families order
+    by_id = {entry.series_id: entry for entry in series}
+    for family in preset.families:
+        for i, task in enumerate(scan_tasks(preset.name, family, 2)):
+            entry = by_id[f"{family}/{i}"]
+            assert entry.values == task.world.y
+            assert entry.period == task.world.spec.period
+
+
+@pytest.mark.parametrize("per_family", [None, 0, True])
+def test_scan_inputs_reject_a_missing_or_small_per_family(per_family: object) -> None:
+    with pytest.raises(CacheError, match="per_family"):
+        public_inputs(  # type: ignore[arg-type]
+            "synthetic-shift1", Path("data"), Path("data/manifests"), per_family=per_family
+        )
+
+
 class _RaisesOnUse:
     """Passes World's length check but raises on any real access."""
 
@@ -156,3 +193,8 @@ def test_unknown_dataset_is_refused(tmp_path: Path) -> None:
     with pytest.raises(CacheError, match="unknown dataset"):
         public_inputs("nope", tmp_path, tmp_path)
     assert CACHE_DATASETS == ("etth1", "ecl", "synthetic-dev")
+
+
+def test_dev_datasets_are_the_cache_datasets_plus_the_scan_presets() -> None:
+    """Every loadable dev dataset, in order; 'all' still expands to the cache ones only."""
+    assert (*CACHE_DATASETS, *SCAN_DATASETS) == DEV_DATASETS

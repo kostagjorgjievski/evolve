@@ -6,7 +6,9 @@ report, leakage rendering and CLI tests are the second half's, in
 blobs (2), the verdicts are mechanical (3), every refusal has a test (4),
 incomplete probe runs are listed and never tabled (5), a pool without an
 ok baseline configuration has no gains (6) and an all-failed learned
-updater keeps its row but loses its gain (7). Real numbers come from a
+updater keeps its row but loses its gain (7); those two also render
+``build_report`` over the same ledger, pinning their subsection sentence,
+learned rows and verdict cells. Real numbers come from a
 tune run plus probe runs on the synthetic fixture (PR C's ``probe``); the
 refusal and verdict cases come from hand-built ledgers in ``tmp_path``,
 whose tune runs reuse ``test_gate1_report_data``'s writer.
@@ -34,6 +36,7 @@ from evolvets.runner import gate1_tune
 from evolvets.runner.gate1_grids import select_configs
 from evolvets.runner.gate1_probe import ProbeSpec, probe
 from evolvets.runner.gate1_probe_data import build_probe_data
+from evolvets.runner.gate1_report import build_report
 from evolvets.runner.gate1_report_data import ReportError, _gap_rows, build_report_data
 from evolvets.runner.gate1_tune import DevPaths, TuneSpec, tune
 from evolvets.updater.interfaces import ConfigValue
@@ -525,6 +528,25 @@ def test_incomplete_probe_runs_are_listed_and_never_tabled(
 # --- Test 6: a pool without an ok baseline --------------------------------------------------------
 
 
+def _verdict_cells(lines: list[str], dataset: str, pool_spec: str) -> list[str]:
+    """One verdict-table row's cells, sliced between the verdicts and the first subsection.
+
+    The wall-clock table above the probe section also has rows starting
+    ``| <dataset> | <pool_spec> |``, so the slice starts at ``### Probe
+    verdicts`` and ends at the pool subsection to keep them out.
+    """
+    verdict_at = lines.index("### Probe verdicts")
+    pool_at = lines.index(f"### {dataset}, pool {pool_spec}")
+    rows = [line for line in lines[verdict_at:pool_at] if line.startswith(f"| {dataset} |")]
+    assert len(rows) == 1
+    return [cell.strip() for cell in rows[0].strip("|").split("|")]
+
+
+def _subsection(lines: list[str], dataset: str, pool_spec: str) -> list[str]:
+    """One probe pool subsection's lines, from its heading to the Notes."""
+    return lines[lines.index(f"### {dataset}, pool {pool_spec}") : lines.index("## Notes")]
+
+
 def test_a_pool_without_an_ok_baseline_has_no_gains(
     synthetic_env: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -538,6 +560,23 @@ def test_a_pool_without_an_ok_baseline_has_no_gains(
     assert section.best_baseline_mase is None
     assert section.gains == ()
     assert [row.baseline for row in section.learned] == list(LEARNED_IDS)  # the probe replayed
+    # and the rendering: the sentence, no baseline line, no gains table, all-none verdicts
+    report = build_report(ledger, ["tune-1"], bootstrap_seed=0, probe_run_ids=["probe-1"])
+    lines = report.splitlines()
+    assert _verdict_cells(lines, "synthetic-dev", "simple") == [
+        "synthetic-dev",
+        "simple",
+        "no",
+        *["none"] * len(LEARNED_IDS),
+    ]
+    subsection = _subsection(lines, "synthetic-dev", "simple")
+    assert "No tuned baseline has an ok configuration on this pool." in subsection
+    assert not any(line.startswith("Best tuned baseline:") for line in subsection)
+    assert not any(line.startswith("| updater | mean gain over") for line in subsection)
+    assert (
+        "| updater | selected config | dev MASE | configurations | "
+        "failed | evaluations | wall seconds |" in subsection
+    )
 
 
 # --- Test 7: an all-failed learned updater --------------------------------------------------------
@@ -568,6 +607,24 @@ def test_an_all_failed_learned_updater_keeps_its_row_and_loses_its_gain(
     assert by_id["ridge_stack"].wall_seconds > 0.0
     assert by_id["loss_gate"].config is not None
     assert [row.updater for row in section.gains] == ["loss_gate"]
+    # and the rendering: the failed updater's cell is none, its row keeps the failures,
+    # and only the ok updater has a gains row
+    report = build_report(ledger, ["tune-1"], bootstrap_seed=0, probe_run_ids=["probe-1"])
+    lines = report.splitlines()
+    cells = _verdict_cells(lines, "synthetic-dev", "simple")
+    verdicts = dict(zip(LEARNED_IDS, cells[3:], strict=True))
+    assert verdicts["ridge_stack"] == "none"
+    assert verdicts["loss_gate"] in {"beats", "worse", "inside", "n/a"}
+    subsection = _subsection(lines, "synthetic-dev", "simple")
+    ridge = by_id["ridge_stack"]
+    assert (
+        f"| ridge_stack | none | none | 2 | 2 | "
+        f"{ridge.evaluations:.4f} | {ridge.wall_seconds:.4f} |" in subsection
+    )
+    assert sum(1 for line in subsection if line.startswith("| ridge_stack |")) == 1
+    (gain,) = section.gains
+    interval = "n/a" if gain.lower is None else f"[{gain.lower:.4f}, {gain.upper:.4f}]"
+    assert f"| loss_gate | {gain.mean:.4f} | {interval} | {gain.verdict} |" in subsection
 
 
 # --- the hand-built probe run helper --------------------------------------------------------------

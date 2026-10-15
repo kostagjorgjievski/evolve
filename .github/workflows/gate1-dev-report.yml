@@ -113,6 +113,8 @@ jobs:
             echo "probe run $probe: recorded git commit ${pc:-NOT FOUND}, GitHub lookup HTTP $ps"
           done
       - name: Build the report
+        env:
+          BOOTSTRAP_SEED: ${{ inputs.bootstrap_seed }}
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           mkdir -p out
@@ -120,7 +122,7 @@ jobs:
           for probe in $PROBE_IDS; do probe_args+=(--probe-run "$probe"); done
           bash .github/scripts/run-logged.sh "gate1 report" "$VENV/bin/evolvets" gate1 report \
             --ledger-root "$LEDGER_ROOT" --run "$RUN_ID" \
-            --bootstrap-seed "${{ inputs.bootstrap_seed }}" "${probe_args[@]}" --out out/gate1-dev-report.md
+            --bootstrap-seed "$BOOTSTRAP_SEED" "${probe_args[@]}" --out out/gate1-dev-report.md
           wc -l out/gate1-dev-report.md
           cat out/gate1-dev-report.md >> "$GITHUB_STEP_SUMMARY"
       - name: Publish the report as notice annotations (dev numbers only)

@@ -35,7 +35,8 @@ Then exit.
 
 ## 4. Starting the next PR
 
-1. `git checkout main && git pull`, then create the branch named in the task.
+1. `git checkout main && git pull`. If the branch named in the task already exists on `origin` with commits not on `main`, an earlier run ran out of time: check it out, rebase it on `origin/main`, read what is there and continue from it. Otherwise create the branch.
+   Commit and push your branch after every meaningful step (at least every 30 turns), so an interrupted run loses nothing. Commits named `wip: ...` are saved work; squash or reword them before opening the PR.
 2. Implement exactly what the task specifies for that PR, including every test it lists. If the task is ambiguous in a way that would cost more than an hour to get wrong, do not guess: open an issue labelled `needs-human` explaining the ambiguity, and exit.
 3. Run the full check suite locally until it is green.
 4. Commit in Conventional Commit style and push.

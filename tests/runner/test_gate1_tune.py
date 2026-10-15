@@ -7,10 +7,12 @@ and the pooled fixture with the fake foundation model (as
 ``tests/updater/test_baselines_replay.py``); small grids keep every run
 quick. The numbers in the records must equal in-process ``replay_dataset`` /
 ``oracle_dataset`` calls exactly, and a tune run never opens a sealed path.
+The TASK_015 additions at the end pin the scan datasets' place in the sweep.
 """
 
 from __future__ import annotations
 
+import argparse
 import ast
 import json
 from collections.abc import Callable, Mapping, Sequence
@@ -24,8 +26,8 @@ from evolvets.arena.errors import ArenaError
 from evolvets.arena.evaluate import replay_dataset, result_to_obj
 from evolvets.arena.oracles import oracle_dataset, oracle_to_obj
 from evolvets.arena.pool import pool_leakage_risk
-from evolvets.cache.datasets import public_inputs
-from evolvets.cache.store import build_cache
+from evolvets.cache.datasets import CACHE_DATASETS, public_inputs
+from evolvets.cache.store import build_cache, cache_id
 from evolvets.foundation.fake import FAKE_SPEC, FakeAdapter
 from evolvets.foundation.store import build_foundation_cache, foundation_cache_id
 from evolvets.ledger.blobs import BlobStore
@@ -652,7 +654,7 @@ def test_cli_tune_refuses_a_dirty_tree(
 
 
 def test_cli_tune_rejects_an_unknown_dataset() -> None:
-    """argparse rejects a dataset outside CACHE_DATASETS + 'all'."""
+    """argparse rejects a dataset outside DEV_DATASETS + 'all'."""
     with pytest.raises(SystemExit):
         cli.main(["gate1", "tune", "--dataset", "nope", "--pool-spec", "simple"])
 
@@ -704,3 +706,54 @@ def test_record_replay_factories_and_ref_prefix(
     assert blob["result"] == result_to_obj(expected)
     assert counts["replays"] == 1
     assert counts[expected.status] == 1
+
+
+# --- TASK_015 PR A: the scan datasets through the sweep (tests 12 and 13) -------------------------
+
+
+@pytest.fixture(scope="module")
+def shift1_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """A synthetic-shift1 scan cache with one series per family, and its paths."""
+    base = tmp_path_factory.mktemp("gate1-shift1")
+    cache_root = base / "cache_store"
+    source, series = public_inputs("synthetic-shift1", base, base, per_family=1)
+    build_cache("synthetic-shift1", source, series, cache_root)
+    return {
+        "base": base,
+        "cache_root": cache_root,
+        "foundation_root": base / "foundation_cache",
+        "data_root": base,
+        "manifest_dir": base,
+    }
+
+
+def test_gate1_axes_all_expands_to_the_cache_datasets_only() -> None:
+    """'all' names exactly the cache datasets; a scan dataset stays only if named."""
+    args = argparse.Namespace(
+        dataset=["all", "synthetic-wide", "all", "synthetic-dev"],
+        pool_spec=["simple", "simple"],
+    )
+    datasets, pool_specs = cli._gate1_axes(args)
+    assert datasets == [*CACHE_DATASETS, "synthetic-wide"]  # first-seen order, no duplicates
+    assert pool_specs == ["simple"]
+
+
+def test_tune_over_a_scan_dataset(shift1_env: dict[str, Path], tmp_path: Path) -> None:
+    """A sweep over synthetic-shift1 completes and carries the oracle metrics (test 13)."""
+    ledger = tmp_path / "ledgers"
+    assert (
+        run_tune(shift1_env, ledger, spec=tune_spec(datasets=("synthetic-shift1",))) == "completed"
+    )
+    records = read_records(ledger, "run-1")
+    payload = records[0].payload
+    assert isinstance(payload, RunStart)
+    config: Any = json.loads(BlobStore(ledger / "run-1" / "blobs").get(payload.config_blob))
+    assert config["datasets"] == ["synthetic-shift1"]
+    assert config["simple_cache_ids"] == {
+        "synthetic-shift1": cache_id(shift1_env["cache_root"], "synthetic-shift1")
+    }
+    for record in records[1:-1]:
+        entry = record.payload
+        assert isinstance(entry, Baseline)
+        if entry.status == "ok" and entry.updater_id != "oracle":
+            assert "oracle_mase" in entry.metrics  # the hindsight oracle rides on replays

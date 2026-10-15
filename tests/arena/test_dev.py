@@ -1,23 +1,36 @@
-"""Dev-pool tests: boundaries, oracle, isolation from sealed/raw, mismatches (tests 1-3)."""
+"""Dev-pool tests: boundaries, oracle, isolation from sealed/raw, mismatches (tests 1-3).
+
+The scan pools of TASK_015 PR A follow (tests 9 to 11): one preset loaded,
+its refusals and its foundation join.
+"""
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
 from evolvets.arena.dev import DevPool, load_dev_pool
 from evolvets.arena.errors import ArenaError
+from evolvets.arena.evaluate import replay_dataset
+from evolvets.arena.pool import pool_leakage_risk
 from evolvets.arena.realdata import sources
 from evolvets.arena.realdata.fetch import fetch, raw_path
 from evolvets.arena.realdata.prepare import prepare, splits_manifest_path
 from evolvets.arena.synthetic.grammar import FAMILIES
 from evolvets.arena.synthetic.oracle import true_best_forecast
+from evolvets.arena.synthetic.presets import SCAN_DATASETS, SCAN_PRESETS, scan_tasks
 from evolvets.arena.synthetic.seeds import dev_tasks
+from evolvets.cache import datasets as datasets_module
 from evolvets.cache.datasets import public_inputs
 from evolvets.cache.store import build_cache, cache_dir
+from evolvets.foundation.fake import FAKE_SPEC, FakeAdapter
+from evolvets.foundation.store import build_foundation_cache
+from evolvets.updater.baselines import BASELINES, DEFAULT_CONFIGS
 from tests.arena.test_realdata_prepare import (
     _build_etth1_fixture,
     _install,
@@ -196,3 +209,125 @@ def test_missing_public_file(real_env: tuple[Path, Path, Path]) -> None:
     _processed(data_root, "etth1", "public").unlink()
     with pytest.raises(ArenaError, match="is missing"):
         load_dev_pool("etth1", cache_root, data_root, manifest_dir)
+
+
+# --- The scan pools (TASK_015 PR A: tests 9 to 11) -----------------------------------------------
+
+
+def build_scan_cache(
+    tmp_path: Path, dataset: str = "synthetic-shift1", per_family: int = 1
+) -> Path:
+    """A scan cache under ``tmp_path``, one series per preset family by default."""
+    cache_root = tmp_path / "cache_store"
+    source, series = public_inputs(dataset, tmp_path, tmp_path, per_family=per_family)
+    build_cache(dataset, source, series, cache_root)
+    return cache_root
+
+
+def _edit_scan_source(cache_root: Path, dataset: str, **changes: str) -> None:
+    """Rewrite a scan cache manifest's source entries the hand-made way."""
+    manifest_file = cache_dir(cache_root, dataset) / "manifest.json"
+    obj = json.loads(manifest_file.read_text(encoding="utf-8"))
+    obj["source"].update(changes)
+    manifest_file.write_text(json.dumps(obj), encoding="utf-8")
+
+
+@pytest.mark.parametrize("dataset", SCAN_DATASETS)
+def test_scan_pool(dataset: str, tmp_path: Path) -> None:
+    """One series per preset family, warmup boundaries, world change points, full oracle."""
+    cache_root = build_scan_cache(tmp_path, dataset)
+    pool = load_dev_pool(dataset, cache_root, Path("data"), Path("data/manifests"))
+    preset = SCAN_PRESETS[dataset]
+    assert [s.series_id for s in pool.series] == [f"{family}/0" for family in preset.families]
+    worlds = {
+        f"{family}/0": scan_tasks(preset.name, family, 1)[0].world for family in preset.families
+    }
+    for entry in pool.series:
+        world = worlds[entry.series_id]
+        assert entry.period == world.spec.period
+        assert entry.scale_end == 300
+        assert entry.score_start == 300  # GrammarConfig().warmup, which the presets keep
+        assert entry.score_end == 2000 - H
+        assert entry.change_points == world.change_points
+        assert entry.values == world.y[: 2000 - H + H]
+        assert entry.oracle is not None
+        assert len(entry.oracle) == 2000 - H - 300
+        for offset, forecast in enumerate(entry.oracle):
+            assert forecast == true_best_forecast(world, 300 + offset, H)
+    replay = replay_dataset(BASELINES["fixed_share"], DEFAULT_CONFIGS["fixed_share"], 0, pool)
+    assert replay.status == "ok"
+    assert len(replay.series) == len(preset.families)
+    assert all(score.oracle_mase is not None for score in replay.series)
+
+
+def test_scan_pool_refuses_a_preset_edited_after_the_cache_was_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cache built while the preset was altered is refused against the real preset."""
+    preset = SCAN_PRESETS["synthetic-shift1"]
+    edited = replace(
+        preset, config=replace(preset.config, max_changes=preset.config.max_changes + 1)
+    )
+    monkeypatch.setattr(
+        datasets_module,
+        "SCAN_PRESETS",
+        MappingProxyType({**SCAN_PRESETS, "synthetic-shift1": edited}),
+    )
+    cache_root = build_scan_cache(tmp_path)  # the source pins the edited preset's hash
+    monkeypatch.undo()
+    with pytest.raises(ArenaError, match="preset_sha256"):
+        load_dev_pool("synthetic-shift1", cache_root, Path("data"), Path("data/manifests"))
+
+
+def test_scan_pool_refuses_a_manifest_naming_another_preset(tmp_path: Path) -> None:
+    """A source whose preset names another scan dataset is refused."""
+    cache_root = build_scan_cache(tmp_path)
+    _edit_scan_source(cache_root, "synthetic-shift1", preset="synthetic-shift2")
+    with pytest.raises(ArenaError, match=r"source\.preset"):
+        load_dev_pool("synthetic-shift1", cache_root, Path("data"), Path("data/manifests"))
+
+
+def test_scan_pool_refuses_an_edited_generator_version(tmp_path: Path) -> None:
+    """A manifest whose source.generator_version was rewritten is refused."""
+    cache_root = build_scan_cache(tmp_path)
+    _edit_scan_source(cache_root, "synthetic-shift1", generator_version="999")
+    with pytest.raises(ArenaError, match="generator_version"):
+        load_dev_pool("synthetic-shift1", cache_root, Path("data"), Path("data/manifests"))
+
+
+def test_scan_pool_refuses_a_per_family_that_does_not_match_the_series_count(
+    tmp_path: Path,
+) -> None:
+    """A per_family implying more series than the cache holds is refused."""
+    cache_root = build_scan_cache(tmp_path)  # five series: one per shift family
+    _edit_scan_source(cache_root, "synthetic-shift1", per_family="2")
+    with pytest.raises(ArenaError, match="but the cache holds"):
+        load_dev_pool("synthetic-shift1", cache_root, Path("data"), Path("data/manifests"))
+
+
+def test_scan_foundation_pool_joins_without_leakage(tmp_path: Path) -> None:
+    """A fake foundation cache over a scan dataset joins the pool and never flags leakage."""
+    cache_root = build_scan_cache(tmp_path, "synthetic-shift2")
+    foundation_root = tmp_path / "foundation_cache"
+    build_foundation_cache(
+        "synthetic-shift2",
+        FakeAdapter(FAKE_SPEC.name),
+        FAKE_SPEC,
+        foundation_root,
+        cache_root,
+        tmp_path,
+        tmp_path,
+        64,
+        per_family=1,
+    )
+    pool = load_dev_pool(
+        "synthetic-shift2",
+        cache_root,
+        tmp_path,
+        tmp_path,
+        pool_spec="simple+foundation",
+        foundation_root=foundation_root,
+        foundation_models=["fake"],
+    )
+    assert [cache.model for cache in pool.foundation] == ["fake"]
+    assert pool_leakage_risk(pool.dataset, pool.foundation) is False

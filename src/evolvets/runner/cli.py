@@ -469,6 +469,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="run id to report; repeatable, in report order",
     )
     gate1_report_cmd.add_argument(
+        "--probe-run",
+        metavar="ID",
+        action="append",
+        help="probe run id to add as the Learned-updater probe section; repeatable",
+    )
+    gate1_report_cmd.add_argument(
         "--bootstrap-seed", type=int, default=0, help="seed of the gaps' paired bootstrap"
     )
     gate1_report_output = gate1_report_cmd.add_mutually_exclusive_group(required=True)
@@ -975,8 +981,14 @@ def _cmd_gate1_report(args: argparse.Namespace) -> int:
     The report is built before anything is written, so a refusal leaves
     ``--out`` unwritten; ``--check`` reports the first differing line.
     """
+    probe_run_ids = tuple(args.probe_run) if args.probe_run else ()
     try:
-        report = build_report(Path(args.ledger_root), args.run, bootstrap_seed=args.bootstrap_seed)
+        report = build_report(
+            Path(args.ledger_root),
+            args.run,
+            bootstrap_seed=args.bootstrap_seed,
+            probe_run_ids=probe_run_ids,
+        )
     except ReportError as exc:
         print(f"FAIL {exc}")
         return 1

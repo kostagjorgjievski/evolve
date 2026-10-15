@@ -8,6 +8,12 @@ bootstrap intervals, refusals and the AST import guard are PR C1's, in
 ``test_gate1_report_data.py``; the fixture environments are the same ones
 that module and ``test_gate1_tune.py`` build (each test module builds its
 own, as elsewhere in the suite).
+
+TASK_014 PR D adds this module's probe-rendering tests: the report without
+probe runs is unchanged (test 1), the leakage order of the probe sections
+(test 8's rendering part), the section layout, Notes and generating line
+(test 9) and the ``--probe-run`` CLI surface (test 10). The probe's numbers,
+verdicts and refusals are ``test_gate1_probe_data.py``'s.
 """
 
 from __future__ import annotations
@@ -27,10 +33,15 @@ from evolvets.cache.datasets import public_inputs
 from evolvets.cache.store import build_cache
 from evolvets.foundation.fake import FAKE_SPEC, FakeAdapter
 from evolvets.foundation.store import build_foundation_cache
+from evolvets.ledger.canonical import canonical_json
 from evolvets.runner import cli
+from evolvets.runner.gate1_probe import ProbeSpec, probe
+from evolvets.runner.gate1_probe_data import build_probe_data
 from evolvets.runner.gate1_report import build_report
 from evolvets.runner.gate1_report_data import build_report_data
 from evolvets.runner.gate1_tune import DevPaths, TuneSpec, tune
+from evolvets.updater.interfaces import ConfigValue
+from evolvets.updater.learned import LEARNED_IDS
 from tests.arena.test_dev import build_real_env
 
 COMMIT = "d" * 40
@@ -145,6 +156,64 @@ def etth1_ledger(etth1_env: dict[str, Path], tmp_path_factory: pytest.TempPathFa
     ledger = tmp_path_factory.mktemp("render-etth1-ledger") / "ledgers"
     assert _tune_run(etth1_env, ledger, "run-leak", _ETTH1_SPEC) == "completed"
     return ledger
+
+
+# --- TASK_014 PR D: probe fixtures ----------------------------------------------------------------
+
+
+#: The small learned grids the rendering fixtures probe with (two ridge_stack
+#: points, one loss_gate point), as ``SMALL_GRIDS`` is for the baselines.
+_PROBE_GRIDS: dict[str, list[dict[str, ConfigValue]]] = {
+    "ridge_stack": [
+        {"half_life": 48.0, "shrink": 1.0, "refit_every": 24},
+        {"half_life": 336.0, "shrink": 0.1, "refit_every": 24},
+    ],
+    "loss_gate": [{"beta": 4.0, "half_life": 336.0, "ridge": 0.01, "refit_every": 24}],
+}
+
+
+def _probe_run(env: dict[str, Path], ledger_root: Path, run_id: str, spec: ProbeSpec) -> str:
+    """Run one probe against a fixture environment; returns the run_end status."""
+    return probe(
+        spec,
+        _dev_paths(env),
+        ledger_root=ledger_root,
+        run_id=run_id,
+        git_commit=COMMIT,
+        grids=_PROBE_GRIDS,
+    )
+
+
+def _probe_spec(
+    tune_run_id: str, dataset: str, pool_specs: tuple[str, ...], models: tuple[str, ...] | None
+) -> ProbeSpec:
+    """A probe spec pinned to one fixture tune run, over some of its pool specs."""
+    return ProbeSpec(
+        tune_run_id=tune_run_id,
+        datasets=(dataset,),
+        pool_specs=pool_specs,
+        foundation_models=models,
+        seed=3,
+        max_wall_seconds=10000.0,
+    )
+
+
+@pytest.fixture(scope="module")
+def synthetic_probe(synthetic_env: dict[str, Path], synthetic_ledger: Path) -> Path:
+    """The synthetic tune ledger plus one completed probe run pinned to run-1."""
+    spec = _probe_spec("run-1", "synthetic-dev", ("simple",), None)
+    assert _probe_run(synthetic_env, synthetic_ledger, "probe-1", spec) == "completed"
+    return synthetic_ledger
+
+
+@pytest.fixture(scope="module")
+def etth1_probe(etth1_env: dict[str, Path], etth1_ledger: Path) -> Path:
+    """The ETTh1 tune ledger plus disjoint probe runs over simple and the pooled spec."""
+    simple = _probe_spec("run-leak", "etth1", ("simple",), ("leaky",))
+    assert _probe_run(etth1_env, etth1_ledger, "probe-leak", simple) == "completed"
+    pooled = _probe_spec("run-leak", "etth1", ("simple+foundation",), ("leaky",))
+    assert _probe_run(etth1_env, etth1_ledger, "probe-leak-fm", pooled) == "completed"
+    return etth1_ledger
 
 
 # --- Test 1: regenerable -------------------------------------------------------------------------
@@ -316,3 +385,203 @@ def test_importing_the_report_module_loads_no_sealed_server_or_pools() -> None:
     loaded = ast.literal_eval(done.stdout.strip())
     assert "evolvets.arena.sealed.server" not in loaded
     assert "evolvets.arena.sealed.pools" not in loaded
+
+
+# --- TASK_014 PR D: the probe rendering (tests 1, 8, 9 and 10) -----------------------------------
+
+
+#: The verdict words a cell may hold, plus "none" for a missing selection.
+_VERDICTS = {"beats", "worse", "inside", "n/a", "none"}
+
+
+def test_a_report_without_probe_runs_is_unchanged(synthetic_ledger: Path) -> None:
+    """Naming no probe run gives main's report byte for byte, and no probe anywhere."""
+    default = build_report(synthetic_ledger, ["run-1"], bootstrap_seed=5)
+    explicit = build_report(synthetic_ledger, ["run-1"], bootstrap_seed=5, probe_run_ids=())
+    assert default == explicit
+    assert "probe" not in default
+
+
+def test_the_probe_section_lays_out_as_specified(synthetic_probe: Path) -> None:
+    """Probe runs, verdicts, then one subsection per pool, between wall-clock and Notes."""
+    report = build_report(synthetic_probe, ["run-1"], bootstrap_seed=5, probe_run_ids=["probe-1"])
+    lines = report.splitlines()
+    probe_at = lines.index("## Learned-updater probe")
+    assert lines.index("## Per-series wall-clock") < probe_at < lines.index("## Notes")
+    assert lines[probe_at + 2] == "### Probe runs"
+    assert (
+        lines[probe_at + 4]
+        == "| run id | condition | status | git commit | tune run | records | validate_run |"
+    )
+    assert f"| probe-1 | gate1-dev-probe | completed | {COMMIT} | run-1 | 5 | none |" in lines
+    verdict_at = lines.index("### Probe verdicts")
+    assert lines[verdict_at + 2] == (
+        "| dataset | pool | leakage risk | " + " | ".join(LEARNED_IDS) + " |"
+    )
+    verdict_rows = [line for line in lines[verdict_at:] if line.startswith("| synthetic-dev |")]
+    assert len(verdict_rows) == 1
+    cells = [cell.strip() for cell in verdict_rows[0].strip("|").split("|")]
+    assert cells[:3] == ["synthetic-dev", "simple", "no"]
+    assert len(cells) == 3 + len(LEARNED_IDS)
+    assert all(cell in _VERDICTS for cell in cells[3:])
+    # the subsection: the best baseline sentence, the learned rows, the gains
+    data = build_probe_data(synthetic_probe, ["run-1"], ["probe-1"], bootstrap_seed=5)
+    (section,) = (*data.sections, *data.leakage_sections)
+    assert section.best_baseline is not None and section.best_baseline_mase is not None
+    pool_at = lines.index("### synthetic-dev, pool simple")
+    assert lines[pool_at + 2] == (
+        f"Best tuned baseline: {section.best_baseline} (dev MASE {section.best_baseline_mase:.4f})"
+    )
+    assert lines[pool_at + 4] == (
+        "| updater | selected config | dev MASE | configurations | "
+        "failed | evaluations | wall seconds |"
+    )
+    rows = lines[pool_at + 6 : pool_at + 6 + len(section.learned)]  # +5 is the table rule
+    for line, tuned in zip(rows, section.learned, strict=True):
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        assert cells[0] == tuned.baseline
+        assert cells[1] == ("none" if tuned.config is None else canonical_json(tuned.config))
+        assert cells[2] == ("none" if tuned.mase is None else f"{tuned.mase:.4f}")
+        assert cells[3:] == [
+            str(tuned.tried),
+            str(tuned.failed),
+            f"{tuned.evaluations:.4f}",
+            f"{tuned.wall_seconds:.4f}",
+        ]
+    assert f"| updater | mean gain over {section.best_baseline} | 95% interval | verdict |" in lines
+    for gain in section.gains:
+        interval = "n/a" if gain.lower is None else f"[{gain.lower:.4f}, {gain.upper:.4f}]"
+        assert f"| {gain.updater} | {gain.mean:.4f} | {interval} | {gain.verdict} |" in lines
+
+
+def test_the_probe_notes_and_generating_line_appear_only_with_probe_runs(
+    synthetic_probe: Path,
+) -> None:
+    """The four extra Notes and the --probe-run ids in the command, only with probe runs."""
+    with_probe = build_report(
+        synthetic_probe, ["run-1"], bootstrap_seed=5, probe_run_ids=["probe-1"]
+    )
+    without = build_report(synthetic_probe, ["run-1"], bootstrap_seed=5)
+    assert (
+        "generated by `evolvets gate1 report --run run-1 --probe-run probe-1 "
+        "--bootstrap-seed 5`" in with_probe
+    )
+    assert "generated by `evolvets gate1 report --run run-1 --bootstrap-seed 5`" in without
+    sentences = (
+        "positive favours the learned updater",
+        "the configurations column shows how many grid points each had",
+        "no multiple-comparison correction is applied",
+        "learners that output forecasts directly are not tested here",
+    )
+    for sentence in sentences:
+        assert sentence in with_probe
+        assert sentence not in without
+    notes = with_probe[with_probe.index("## Notes") :]
+    assert notes.index("The Gate 1 decision is the owner's.") < notes.index(
+        "positive favours the learned updater"
+    )
+
+
+def test_two_renders_of_the_same_probe_ledger_are_byte_identical(
+    synthetic_probe: Path, tmp_path: Path
+) -> None:
+    """The probe report is regenerable: same ledger and seed, same bytes, even elsewhere."""
+    first = build_report(synthetic_probe, ["run-1"], bootstrap_seed=5, probe_run_ids=["probe-1"])
+    assert (
+        build_report(synthetic_probe, ["run-1"], bootstrap_seed=5, probe_run_ids=["probe-1"])
+        == first
+    )
+    elsewhere = tmp_path / "elsewhere"
+    shutil.copytree(synthetic_probe, elsewhere)
+    assert build_report(elsewhere, ["run-1"], bootstrap_seed=5, probe_run_ids=["probe-1"]) == first
+
+
+def test_probe_leakage_sections_follow_the_clean_ones(etth1_probe: Path) -> None:
+    """The pooled subsection carries (leakage risk) and comes last, in the verdict table too."""
+    report = build_report(
+        etth1_probe, ["run-leak"], bootstrap_seed=0, probe_run_ids=["probe-leak", "probe-leak-fm"]
+    )
+    lines = report.splitlines()
+    clean = lines.index("### etth1, pool simple")
+    pooled = lines.index("### etth1, pool simple+foundation (leakage risk)")
+    assert lines.index("### Probe runs") < clean < pooled
+    assert any(line.startswith("| probe-leak |") for line in lines)
+    assert any(line.startswith("| probe-leak-fm |") for line in lines)
+    verdict_at = lines.index("### Probe verdicts")
+    verdict_rows = [line for line in lines[verdict_at:clean] if line.startswith("| etth1 |")]
+    assert len(verdict_rows) == 2
+    assert verdict_rows[0].startswith("| etth1 | simple | no |")
+    assert verdict_rows[1].startswith("| etth1 | simple+foundation | yes |")
+    for row in verdict_rows:
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        assert len(cells) == 3 + len(LEARNED_IDS)
+        assert all(cell in _VERDICTS for cell in cells[3:])
+
+
+def _probe_report_args(ledger: Path, *extra: str) -> list[str]:
+    """A gate1 report invocation over run-leak and both probe runs, plus the output arguments."""
+    return [
+        "gate1",
+        "report",
+        "--ledger-root",
+        str(ledger),
+        "--run",
+        "run-leak",
+        "--probe-run",
+        "probe-leak",
+        "--probe-run",
+        "probe-leak-fm",
+        *extra,
+    ]
+
+
+def test_cli_probe_run_is_repeatable(
+    etth1_probe: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two --probe-run flags name both probe runs, and --out carries their section."""
+    out = tmp_path / "report.md"
+    args = _probe_report_args(etth1_probe, "--bootstrap-seed", "3", "--out", str(out))
+    assert cli.main(args) == 0
+    expected = build_report(
+        etth1_probe, ["run-leak"], bootstrap_seed=3, probe_run_ids=["probe-leak", "probe-leak-fm"]
+    )
+    assert out.read_text(encoding="utf-8") == expected
+    assert capsys.readouterr().out.startswith("OK ")
+
+
+def test_cli_probe_refusal_writes_nothing(
+    synthetic_probe: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A probe refusal is one FAIL line, exit 1, and --out stays unwritten."""
+    out = tmp_path / "report.md"
+    args = [
+        "gate1",
+        "report",
+        "--ledger-root",
+        str(synthetic_probe),
+        "--run",
+        "run-1",
+        "--probe-run",
+        "nope",
+        "--out",
+        str(out),
+    ]
+    assert cli.main(args) == 1
+    assert capsys.readouterr().out.startswith("FAIL ")
+    assert not out.exists()
+
+
+def test_cli_check_on_the_written_probe_report(
+    etth1_probe: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--check accepts the freshly written probe report and rejects a one-character change."""
+    out = tmp_path / "report.md"
+    assert cli.main(_probe_report_args(etth1_probe, "--out", str(out))) == 0
+    assert cli.main(_probe_report_args(etth1_probe, "--check", str(out))) == 0
+    lines = out.read_text(encoding="utf-8").splitlines()
+    target = next(i for i, line in enumerate(lines) if line.startswith("| probe-leak |"))
+    lines[target] = lines[target].replace("completed", "completee", 1)
+    tampered = tmp_path / "tampered.md"
+    tampered.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert cli.main(_probe_report_args(etth1_probe, "--check", str(tampered))) == 1
+    assert f"differs at line {target + 1}" in capsys.readouterr().out

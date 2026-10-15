@@ -1,0 +1,107 @@
+name: Gate 1 headroom scan report
+
+# Builds the headroom scan report (TASK_015) from completed scan tune runs on the lab
+# node and publishes it (dev/synthetic numbers only: no sealed data is involved) as the
+# job summary and an artifact. Also prints each run's recorded git commit and whether it
+# is a real commit of this repository. Owner-only, manual dispatch only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_ids:
+        description: Space-separated tune run ids to scan, in report order (each becomes --run)
+        required: true
+      bootstrap_seed:
+        description: Bootstrap seed
+        default: "0"
+
+concurrency:
+  group: gate1-headroom-report
+  cancel-in-progress: false
+
+jobs:
+  headroom-report:
+    if: github.actor == github.repository_owner
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 120
+    env:
+      UV_INDEX_URL: ${{ vars.GPU_PIP_INDEX_URL }}
+      UV_PYTHON_PREFERENCE: only-system
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - name: Get code
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          find . -mindepth 1 -delete
+          git_fetch() {
+            git init -q . &&
+            git -c "http.extraheader=AUTHORIZATION: bearer ${TOKEN}" \
+              -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+              fetch -q --depth 1 --no-tags "https://github.com/${REPO}.git" "${SHA}" &&
+            git checkout -q FETCH_HEAD
+          }
+          if timeout 60 bash -c "$(declare -f git_fetch); git_fetch"; then
+            echo "Got ${SHA} with git"
+          else
+            echo "git unavailable from $(hostname); downloading tarball via api.github.com"
+            find . -mindepth 1 -delete
+            curl -fsSL --retry 5 --retry-delay 10 --max-time 300 \
+              -H "Authorization: Bearer ${TOKEN}" \
+              "https://api.github.com/repos/${REPO}/tarball/${SHA}" \
+              | tar -xz --strip-components=1
+            # current_git_commit needs a git checkout with no modified files
+            git init -q . && git add -A >/dev/null && \
+              git -c user.name=ci -c user.email=ci@example.invalid commit -q -m "tarball of ${SHA}"
+          fi
+      - name: Paths
+        run: |
+          set -euo pipefail
+          base="${EVOLVETS_DATA:-/data}/evolve"
+          {
+            echo "LEDGER_ROOT=$base/ledgers"
+            echo "VENV=$base/venv-dev"
+          } >> "$GITHUB_ENV"
+      - name: Python environment from uv.lock
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bash .github/scripts/run-logged.sh "python env" bash .github/scripts/gpu-env.sh dev "$VENV"
+      - name: Check each run's recorded commit
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_IDS: ${{ inputs.run_ids }}
+        run: |
+          set -euo pipefail
+          for run in $RUN_IDS; do
+            test -f "$LEDGER_ROOT/$run/main.jsonl" || { echo "missing run $run"; exit 1; }
+            commit="$(head -n1 "$LEDGER_ROOT/$run/main.jsonl" | grep -oE '"git_commit" *: *"[0-9a-f]{40}"' | grep -oE '[0-9a-f]{40}' || true)"
+            status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 \
+              -H "Authorization: Bearer ${TOKEN}" \
+              "https://api.github.com/repos/${REPO}/commits/${commit}" || true)"
+            echo "run $run: recorded git commit ${commit:-NOT FOUND}, GitHub lookup HTTP $status"
+          done
+      - name: Build the report
+        env:
+          RUN_IDS: ${{ inputs.run_ids }}
+          BOOTSTRAP_SEED: ${{ inputs.bootstrap_seed }}
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          mkdir -p out
+          run_args=()
+          for run in $RUN_IDS; do run_args+=(--run "$run"); done
+          bash .github/scripts/run-logged.sh "gate1 headroom" "$VENV/bin/evolvets" gate1 headroom \
+            --ledger-root "$LEDGER_ROOT" "${run_args[@]}" \
+            --bootstrap-seed "$BOOTSTRAP_SEED" --out out/headroom-scan.md
+          wc -l out/headroom-scan.md
+          sha256sum out/headroom-scan.md
+          cat out/headroom-scan.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the report (dev numbers only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: headroom-scan
+          path: out/headroom-scan.md
+          retention-days: 90

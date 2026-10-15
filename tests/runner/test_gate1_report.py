@@ -13,7 +13,8 @@ TASK_014 PR D adds this module's probe-rendering tests: the report without
 probe runs is unchanged (test 1), the leakage order of the probe sections
 (test 8's rendering part), the section layout, Notes and generating line
 (test 9) and the ``--probe-run`` CLI surface (test 10). The probe's numbers,
-verdicts and refusals are ``test_gate1_probe_data.py``'s.
+verdicts and refusals are ``test_gate1_probe_data.py``'s, as are the
+rendering halves of tests 6 and 7, asserted over those tests' own ledgers.
 """
 
 from __future__ import annotations

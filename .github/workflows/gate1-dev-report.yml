@@ -15,7 +15,7 @@ on:
         description: Bootstrap seed
         default: "0"
       probe_run_ids:
-        description: Space-separated learned-updater probe run ids (TASK_014), empty for none
+        description: Space-separated learned-updater probe run ids (TASK_014), 'auto' for every gate1-probe-* run in the ledger, empty for none
         default: ""
 
 concurrency:
@@ -102,6 +102,10 @@ jobs:
             echo "COMMIT_OK: the recorded commit exists in the repository"
           else
             echo "::warning title=tarball commit?::The recorded commit is not a commit of this repository. The tune run may need a redo from a git checkout before the sealed run."
+          fi
+          if [ "$PROBE_IDS" = "auto" ]; then
+            PROBE_IDS="$(ls -1 "$LEDGER_ROOT" | grep '^gate1-probe-' | tr '\n' ' ')"
+            echo "probe runs found: $PROBE_IDS"
           fi
           echo "PROBE_IDS=$PROBE_IDS" >> "$GITHUB_ENV"
           for probe in $PROBE_IDS; do

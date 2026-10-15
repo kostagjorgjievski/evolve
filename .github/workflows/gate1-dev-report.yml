@@ -14,6 +14,9 @@ on:
       bootstrap_seed:
         description: Bootstrap seed
         default: "0"
+      probe_run_ids:
+        description: Space-separated learned-updater probe run ids (TASK_014), empty for none
+        default: ""
 
 concurrency:
   group: gate1-dev-report
@@ -71,6 +74,7 @@ jobs:
           TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RUN_INPUT: ${{ inputs.tune_run_id }}
+          PROBE_IDS: ${{ inputs.probe_run_ids }}
         run: |
           set -euo pipefail
           run_id="$RUN_INPUT"
@@ -99,13 +103,24 @@ jobs:
           else
             echo "::warning title=tarball commit?::The recorded commit is not a commit of this repository. The tune run may need a redo from a git checkout before the sealed run."
           fi
+          echo "PROBE_IDS=$PROBE_IDS" >> "$GITHUB_ENV"
+          for probe in $PROBE_IDS; do
+            test -f "$LEDGER_ROOT/$probe/main.jsonl" || { echo "missing probe run $probe"; exit 1; }
+            pc="$(head -n1 "$LEDGER_ROOT/$probe/main.jsonl" | grep -oE '"git_commit" *: *"[0-9a-f]{40}"' | grep -oE '[0-9a-f]{40}' || true)"
+            ps="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 \
+              -H "Authorization: Bearer ${TOKEN}" \
+              "https://api.github.com/repos/${REPO}/commits/${pc}" || true)"
+            echo "probe run $probe: recorded git commit ${pc:-NOT FOUND}, GitHub lookup HTTP $ps"
+          done
       - name: Build the report
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           mkdir -p out
+          probe_args=()
+          for probe in $PROBE_IDS; do probe_args+=(--probe-run "$probe"); done
           bash .github/scripts/run-logged.sh "gate1 report" "$VENV/bin/evolvets" gate1 report \
             --ledger-root "$LEDGER_ROOT" --run "$RUN_ID" \
-            --bootstrap-seed "${{ inputs.bootstrap_seed }}" --out out/gate1-dev-report.md
+            --bootstrap-seed "${{ inputs.bootstrap_seed }}" "${probe_args[@]}" --out out/gate1-dev-report.md
           wc -l out/gate1-dev-report.md
           cat out/gate1-dev-report.md >> "$GITHUB_STEP_SUMMARY"
       - name: Publish the report as notice annotations (dev numbers only)

@@ -39,6 +39,7 @@ from evolvets.ledger.schema import Record
 from evolvets.ledger.store import LedgerCorruptError, LedgerReader
 from evolvets.ledger.validate import validate_run
 from evolvets.runner.gate1_grids import Selection, select_configs
+from evolvets.runner.gate1_probe import PROBE_CONDITION
 from evolvets.updater.baselines import BASELINE_IDS
 
 #: Bootstrap resamples behind every Gaps interval.
@@ -446,10 +447,19 @@ def _pools_of(
 # --- one pool section-----------------------------------------------------------------------------
 
 
-def _tuned_rows(pool: _Pool, picks: dict[str, dict[str, Any] | None]) -> tuple[TunedRow, ...]:
-    """Build the Tuned baselines rows, in BASELINE_IDS order, from one pool's records."""
+def _tuned_rows(
+    pool: _Pool,
+    picks: dict[str, dict[str, Any] | None],
+    *,
+    updater_ids: Sequence[str] = BASELINE_IDS,
+) -> tuple[TunedRow, ...]:
+    """Build the tuned rows, in ``updater_ids`` order, from one pool's records.
+
+    The baselines' ids for a tune run's pools; the learned ids
+    (``LEARNED_IDS``) for a probe run's (TASK_014 PR D).
+    """
     rows: list[TunedRow] = []
-    for baseline_id in BASELINE_IDS:
+    for baseline_id in updater_ids:
         entries = pool.by_baseline.get(baseline_id)
         if not entries:
             continue
@@ -741,6 +751,10 @@ def build_report_data(
     for run_id in run_ids:
         records = _read_run(root, run_id)
         start, config = _run_start(root, run_id, records)
+        if start.condition == PROBE_CONDITION:
+            raise ReportError(
+                f"run {run_id}: a {PROBE_CONDITION} run is named with --probe-run, not --run"
+            )
         if versions is None:
             versions = dict(start.protocol_versions)
             versions_run = run_id

@@ -25,7 +25,7 @@ A learned updater beats the best tuned baseline outside the 95 % interval on: sy
 - ETTh1 and ECL results with foundation models in the pool are leakage-risk (a foundation model may have seen these datasets in pretraining).
 - Each verdict is one of several comparisons (6 pools x 2 learned updaters); no multiple-comparison correction is applied.
 - Only convex-weight learners were tried (two of them, with 6 grid points each); learners that output forecasts directly are not tested here.
-- The baselines' grid-edge note from the first run still applies: Hedge `eta` sits at the lowest grid value on ETTh1 (0.015625, simple and pooled) and on ECL pooled (0.03125), so the best tuned baseline on those pools may be slightly under-tuned.
+- The baselines' grid-edge note from the first run, restated from this report's tables: Hedge `eta` = 0.015625, the lowest `ETA_GRID` value, on ETTh1 simple, ETTh1 simple+foundation and ECL simple; Fixed-Share `alpha` = 0.0001, the lowest `ALPHA_GRID` value, on ECL simple+foundation and synthetic-dev simple+foundation.
 
 ## Provenance (for reproduction)
 

@@ -280,7 +280,7 @@ class HeadroomSection:
     best_baseline: str | None
     best_baseline_mase: float | None
     replay_wall_seconds: float | None  # budget.wall_seconds of the best baseline's selected record
-    tune_wall_seconds: float  # loop-sum of budget.wall_seconds over every baseline record of the pool
+    tune_wall_seconds: float  # loop-sum of budget.wall_seconds over the pool's baseline records
     rows: tuple[HeadroomRow, ...]  # HEADROOM_TARGETS order; () without a best baseline
 
 

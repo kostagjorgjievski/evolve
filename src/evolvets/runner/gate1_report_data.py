@@ -33,6 +33,7 @@ from typing import Any
 from evolvets.arena.oracles import ORACLE_SWITCHES
 from evolvets.arena.sealed.client import SERIES_TIMEOUT_SECONDS
 from evolvets.arena.synthetic.grammar import FAMILIES
+from evolvets.arena.synthetic.presets import SCAN_DATASETS
 from evolvets.ledger.blobs import BlobStore
 from evolvets.ledger.payloads import Baseline, RunEnd, RunStart
 from evolvets.ledger.schema import Record
@@ -47,9 +48,10 @@ BOOTSTRAP_RESAMPLES = 2000
 #: Indexes into the sorted resample means that bound the 95% interval.
 _INTERVAL_LOW_INDEX = 50
 _INTERVAL_HIGH_INDEX = 1949
-#: The dataset whose series ids are ``<family>/<index>`` and whose results
-#: carry the true-best forecast.
-_SYNTHETIC_DATASET = "synthetic-dev"
+#: The dev datasets whose series ids are ``<family>/<index>`` and whose
+#: results carry the true-best forecast: ``synthetic-dev`` and every scan
+#: preset (TASK_015 PR B), so scan pools get per-family Gaps tables too.
+_SYNTHETIC_DATASETS = frozenset({"synthetic-dev", *SCAN_DATASETS})
 
 
 class ReportError(Exception):
@@ -553,8 +555,7 @@ def _max_series_wall_seconds(run_id: str, pool: _Pool) -> float | None:
     return largest
 
 
-def _labeled_differences(
-    baseline_mase: Sequence[float],
+def _labeled_targets(
     oracle_true_best: Sequence[float | None],
     expert_rows: Sequence[Sequence[float]],
     switch_rows: Sequence[Sequence[float]],
@@ -562,41 +563,37 @@ def _labeled_differences(
     global_index: int,
     global_expert: str,
 ) -> list[tuple[str, list[float]]]:
-    """The per-series differences ``d_s = baseline_mase_s - oracle_s``, one row per oracle."""
-    labeled: list[tuple[str, list[float]]] = []
+    """The per-series target values ``t_s``, one row per oracle, Gaps-table labels and order.
+
+    The headroom scan (TASK_015 PR B) reads the targets themselves, so they
+    are labelled apart from any baseline; the Gaps table's differences are
+    the difference step below.
+    """
+    targets: list[tuple[str, list[float]]] = []
     if len(oracle_true_best) > 0 and all(value is not None for value in oracle_true_best):
         true_best_row: list[float] = []
-        for i in range(len(baseline_mase)):
-            value = oracle_true_best[i]
-            if value is not None:  # always true here; keeps the subtraction typed
-                true_best_row.append(baseline_mase[i] - value)
-        labeled.append(("true-best forecast", true_best_row))
-    labeled.append(
-        (
-            f"best fixed expert ({global_expert})",
-            [baseline_mase[i] - expert_rows[i][global_index] for i in range(len(baseline_mase))],
-        )
+        for value in oracle_true_best:
+            if value is not None:  # always true here; keeps the row typed
+                true_best_row.append(value)
+        targets.append(("true-best forecast", true_best_row))
+    targets.append(
+        (f"best fixed expert ({global_expert})", [row[global_index] for row in expert_rows])
     )
-    labeled.append(
-        (
-            "best expert per series",
-            [baseline_mase[i] - _lowest(expert_rows[i]) for i in range(len(baseline_mase))],
-        )
-    )
+    targets.append(("best expert per series", [_lowest(row) for row in expert_rows]))
     for index, m in enumerate(ORACLE_SWITCHES):
-        labeled.append(
-            (
-                f"switch_mase_m{m}",
-                [baseline_mase[i] - switch_rows[i][index] for i in range(len(baseline_mase))],
-            )
-        )
-    labeled.append(
-        (
-            "select_mase",
-            [baseline_mase[i] - select_values[i] for i in range(len(baseline_mase))],
-        )
-    )
-    return labeled
+        targets.append((f"switch_mase_m{m}", [row[index] for row in switch_rows]))
+    targets.append(("select_mase", list(select_values)))
+    return targets
+
+
+def _differences(
+    targets: Sequence[tuple[str, Sequence[float]]], baseline_mase: Sequence[float]
+) -> list[tuple[str, list[float]]]:
+    """The per-series differences ``d_s = b_s - t_s`` of labelled target rows."""
+    return [
+        (label, [baseline_mase[i] - target for i, target in enumerate(values)])
+        for label, values in targets
+    ]
 
 
 def _best_baseline(
@@ -617,6 +614,36 @@ def _best_baseline(
     return best
 
 
+def _selected_entry(
+    run_id: str,
+    dataset: str,
+    pool_spec: str,
+    pool: _Pool,
+    best: tuple[str, dict[str, Any]],
+) -> tuple[Record, dict[str, Any]]:
+    """The best baseline's selected record and blob; refuse a selection that names no record.
+
+    Both the Gaps tables and the headroom scan (TASK_015 PR B) start from
+    this one record, so they read the same series the same way.
+    """
+    best_id, pick = best
+    record_id = _obj_str(pick.get("record_id"), f"{best_id}'s selected record_id")
+    found = next(
+        (
+            (record, blob)
+            for record, blob in pool.by_baseline.get(best_id, [])
+            if record.record_id == record_id
+        ),
+        None,
+    )
+    if found is None:
+        raise ReportError(
+            f"run {run_id}: {dataset}/{pool_spec} selection names record {record_id}, "
+            f"which is not a {best_id} record of this run"
+        )
+    return found
+
+
 def _build_section(
     run_id: str,
     dataset: str,
@@ -634,23 +661,9 @@ def _build_section(
     family_gaps: tuple[FamilyGaps, ...] = ()
     best = _best_baseline(dataset, pool_spec, selection)
     if best is not None:
-        best_id, pick = best
-        record_id = _obj_str(pick.get("record_id"), f"{best_id}'s selected record_id")
-        found = next(
-            (
-                (record, blob)
-                for record, blob in pool.by_baseline.get(best_id, [])
-                if record.record_id == record_id
-            ),
-            None,
-        )
-        if found is None:
-            raise ReportError(
-                f"run {run_id}: {dataset}/{pool_spec} selection names record {record_id}, "
-                f"which is not a {best_id} record of this run"
-            )
-        best_result = _result_of(run_id, found[1])
-        where = f"run {run_id} record {record_id}"
+        record, blob = _selected_entry(run_id, dataset, pool_spec, pool, best)
+        best_result = _result_of(run_id, blob)
+        where = f"run {run_id} record {record.record_id}"
         best_series = best_result.get("series")
         if not isinstance(best_series, list):
             raise ReportError(f"{where}: the result's series must be a list")
@@ -680,17 +693,19 @@ def _build_section(
             raise ReportError(
                 f"run {run_id}: global expert {global_expert!r} is not one of {expert_names}"
             )
-        labeled = _labeled_differences(
+        labeled = _differences(
+            _labeled_targets(
+                oracle_true_best,
+                expert_rows,
+                switch_rows,
+                select_values,
+                expert_names.index(global_expert),
+                global_expert,
+            ),
             baseline_mase,
-            oracle_true_best,
-            expert_rows,
-            switch_rows,
-            select_values,
-            expert_names.index(global_expert),
-            global_expert,
         )
         gaps = _gap_rows(labeled, bootstrap_seed)
-        if dataset == _SYNTHETIC_DATASET:
+        if dataset in _SYNTHETIC_DATASETS:
             series_ids = _series_ids(run_id, best_result)
             by_family: dict[str, list[int]] = {}
             for index, series_id in enumerate(series_ids):
@@ -722,17 +737,32 @@ def _build_section(
 # --- the entry point------------------------------------------------------------------------------
 
 
-def build_report_data(
-    ledger_root: Path, run_ids: Sequence[str], *, bootstrap_seed: int
-) -> ReportData:
-    """Read the named runs and compute the report's numbers from the ledger alone.
+@dataclass
+class _PoolRef:
+    """One pool of one completed run, with that run's selection, claimed once."""
 
-    Raises :class:`ReportError` on any refusal the report's rules define:
-    a duplicate or unloadable run id, a sealed-stream record, a config that
-    is not a Gate 1 experiment, a protocol-version mix across runs, a
-    result that disagrees with its run's config, mismatched series ids, a
-    ``run_end`` selection the records do not reproduce, or two complete
-    runs over one ``(dataset, pool spec)``.
+    run_id: str
+    dataset: str
+    pool_spec: str
+    pool: _Pool
+    selection: Selection
+
+
+def _read_named_runs(
+    root: Path, run_ids: Sequence[str]
+) -> tuple[tuple[RunRow, ...], dict[str, str], tuple[_PoolRef, ...]]:
+    """Read and verify every named run and claim its pools: the report's per-run loop.
+
+    The headroom scan (TASK_015 PR B) reads the same runs through this
+    helper, so both refuse identically: a duplicate or unloadable run id, a
+    sealed-stream record, a config that is not a Gate 1 experiment, a probe
+    run named with ``--run``, a protocol-version mix across runs, a result
+    that disagrees with its run's config, mismatched series ids, a
+    ``run_end`` selection the records do not reproduce, or two complete runs
+    over one ``(dataset, pool spec)``. Runs that did not complete are listed
+    in the rows and contribute no pool; the pools arrive in the report's
+    iteration order (run order, then the config's datasets, then its pool
+    specs).
     """
     if not run_ids:
         raise ReportError("at least one run id is required")
@@ -741,10 +771,8 @@ def build_report_data(
         if run_id in seen:
             raise ReportError(f"duplicate run id {run_id!r} in {list(run_ids)}")
         seen.add(run_id)
-    root = Path(ledger_root)
     rows: list[RunRow] = []
-    sections: list[PoolSection] = []
-    leakage_sections: list[PoolSection] = []
+    pools: list[_PoolRef] = []
     claimed: dict[tuple[str, str], str] = {}
     versions: dict[str, str] | None = None
     versions_run = ""
@@ -795,16 +823,44 @@ def build_report_data(
                         f"two complete runs cover {dataset}/{pool_spec}: {owner} and {run_id}"
                     )
                 claimed[(dataset, pool_spec)] = run_id
-                section = _build_section(
-                    run_id, dataset, pool_spec, pool, run_pools.selection, bootstrap_seed
+                pools.append(
+                    _PoolRef(
+                        run_id=run_id,
+                        dataset=dataset,
+                        pool_spec=pool_spec,
+                        pool=pool,
+                        selection=run_pools.selection,
+                    )
                 )
-                if section.leakage_risk:
-                    leakage_sections.append(section)
-                else:
-                    sections.append(section)
     assert versions is not None  # run_ids is non-empty, so one run set them
+    return tuple(rows), versions, tuple(pools)
+
+
+def build_report_data(
+    ledger_root: Path, run_ids: Sequence[str], *, bootstrap_seed: int
+) -> ReportData:
+    """Read the named runs and compute the report's numbers from the ledger alone.
+
+    Raises :class:`ReportError` on any refusal the report's rules define:
+    a duplicate or unloadable run id, a sealed-stream record, a config that
+    is not a Gate 1 experiment, a protocol-version mix across runs, a
+    result that disagrees with its run's config, mismatched series ids, a
+    ``run_end`` selection the records do not reproduce, or two complete
+    runs over one ``(dataset, pool spec)``.
+    """
+    rows, versions, pools = _read_named_runs(Path(ledger_root), run_ids)
+    sections: list[PoolSection] = []
+    leakage_sections: list[PoolSection] = []
+    for ref in pools:
+        section = _build_section(
+            ref.run_id, ref.dataset, ref.pool_spec, ref.pool, ref.selection, bootstrap_seed
+        )
+        if section.leakage_risk:
+            leakage_sections.append(section)
+        else:
+            sections.append(section)
     return ReportData(
-        run_rows=tuple(rows),
+        run_rows=rows,
         protocol_versions=versions,
         sections=tuple(sections),
         leakage_sections=tuple(leakage_sections),

@@ -22,6 +22,7 @@ import pytest
 
 from evolvets.arena.oracles import ORACLE_SWITCHES
 from evolvets.arena.synthetic.grammar import FAMILIES
+from evolvets.arena.synthetic.presets import SCAN_PRESETS
 from evolvets.arena.versions import protocol_versions
 from evolvets.cache.datasets import public_inputs
 from evolvets.cache.store import build_cache
@@ -65,15 +66,15 @@ def synthetic_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     }
 
 
-@pytest.fixture(scope="module")
-def etth1_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+def _build_etth1_env(base: Path) -> dict[str, Path]:
     """The fixture ETTh1 prepared and cached, plus a leaking pooled model's cache.
 
     The ``leaky`` model records ETTh1 overlap ``"yes"``, so results replayed
     over ``simple+foundation`` carry ``leakage_risk`` true while the simple
-    ones stay false (as ``real_env`` in tests/arena/test_pool.py).
+    ones stay false (as ``real_env`` in tests/arena/test_pool.py). Shared
+    with ``test_gate1_headroom`` (TASK_015 PR B), which wraps it in its own
+    module-scoped fixture.
     """
-    base = tmp_path_factory.mktemp("report-etth1")
     monkeypatch = pytest.MonkeyPatch()
     try:
         data_root, manifest_dir, cache_root = build_real_env(base, monkeypatch)
@@ -98,6 +99,12 @@ def etth1_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
         "data_root": data_root,
         "manifest_dir": manifest_dir,
     }
+
+
+@pytest.fixture(scope="module")
+def etth1_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """The ETTh1 fixture environment of ``_build_etth1_env``, in this module's own directory."""
+    return _build_etth1_env(tmp_path_factory.mktemp("report-etth1"))
 
 
 def _dev_paths(env: dict[str, Path]) -> DevPaths:
@@ -354,6 +361,60 @@ def test_constant_differences_give_a_degenerate_interval(tmp_path: Path) -> None
         assert row.mean == 0.25
         assert row.lower == 0.25
         assert row.upper == 0.25
+
+
+# --- TASK_015 PR B, test 12: family gaps on scan pools -------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def shift1_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """A synthetic-shift1 cache with one series per preset family, and the paths to load it."""
+    base = tmp_path_factory.mktemp("report-shift1")
+    cache_root = base / "cache_store"
+    source, series = public_inputs("synthetic-shift1", base, base, per_family=1)
+    build_cache("synthetic-shift1", source, series, cache_root)
+    return {
+        "base": base,
+        "cache_root": cache_root,
+        "foundation_root": base / "foundation_cache",
+        "data_root": base,
+        "manifest_dir": base,
+    }
+
+
+def test_a_scan_pool_carries_family_gaps_per_preset_family(
+    shift1_env: dict[str, Path], tmp_path: Path
+) -> None:
+    """A synthetic-shift1 section has one FamilyGaps per preset family, in FAMILIES order."""
+    ledger = tmp_path / "ledgers"
+    assert (
+        _tune(
+            shift1_env,
+            ledger,
+            run_id="run-shift",
+            spec=TuneSpec(
+                datasets=("synthetic-shift1",),
+                pool_specs=("simple",),
+                foundation_models=None,
+                seed=7,
+                max_wall_seconds=10000.0,
+            ),
+        )
+        == "completed"
+    )
+    data = build_report_data(ledger, ["run-shift"], bootstrap_seed=0)
+    (section,) = data.sections
+    assert section.dataset == "synthetic-shift1"
+    preset = SCAN_PRESETS["synthetic-shift1"]
+    assert [table.family for table in section.family_gaps] == [
+        family for family in FAMILIES if family in preset.families
+    ]
+    # each family table holds the same oracle rows as the pool's, over that family only
+    gaps = section.gaps
+    assert gaps is not None
+    for table in section.family_gaps:
+        assert [row.label for row in table.rows] == [row.label for row in gaps]
+        assert all(row.lower is None for row in table.rows)  # one series per family here
 
 
 # --- Test 6: failed grid points -------------------------------------------------------------------

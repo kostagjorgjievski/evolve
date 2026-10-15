@@ -85,6 +85,7 @@ module = [
     # TASK_012 PR A: gate1_sealed (split: plan first, run next).
     # TASK_014 PR C: gate1_probe; PR D: gate1_probe_data (split: data first,
     # rendering next).
+    # TASK_015 PR B: gate1_headroom (split: data first, rendering next).
     "evolvets.runner.runs",
     "evolvets.runner.gate1_grids",
     "evolvets.runner.gate1_tune",
@@ -93,6 +94,7 @@ module = [
     "evolvets.runner.gate1_report_data",
     "evolvets.runner.gate1_report",
     "evolvets.runner.gate1_sealed",
+    "evolvets.runner.gate1_headroom",
 ]
 strict = true
 

@@ -17,13 +17,13 @@ on:
       dataset:
         description: "Dataset"
         type: choice
-        options: [synthetic-dev, etth1, ecl]
+        options: [synthetic-dev, etth1, ecl, synthetic-shift1, synthetic-shift2, synthetic-shift3, synthetic-wide]
         default: synthetic-dev
       gpus:
         description: "How many free GPUs to request"
         default: "1"
       per_family:
-        description: "Synthetic tasks per family (synthetic-dev only)"
+        description: "Synthetic tasks per family (synthetic datasets only)"
         default: "20"
       batch_size:
         description: "Contexts per model call"
@@ -106,13 +106,13 @@ jobs:
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
           run() { bash .github/scripts/run-logged.sh "data/cache step" "$VENV/bin/evolvets" "$@"; }
-          if [ "$DATASET" != "synthetic-dev" ]; then
+          if [[ "$DATASET" != synthetic-* ]]; then
             run data verify "$DATASET" --data-root "$DATA_ROOT" \
               || { run data fetch "$DATASET" --data-root "$DATA_ROOT"; \
                    run data prepare "$DATASET" --data-root "$DATA_ROOT"; }
             run cache build "$DATASET" --cache-root "$CACHE_ROOT" --data-root "$DATA_ROOT"
           else
-            run cache build synthetic-dev --per-family "$PER_FAMILY" \
+            run cache build "$DATASET" --per-family "$PER_FAMILY" \
               --cache-root "$CACHE_ROOT" --data-root "$DATA_ROOT"
           fi
       - name: Smoke check on the GPU
@@ -126,7 +126,7 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           args=(--dataset "$DATASET" --model "$MODEL" --device cuda --batch-size "$BATCH_SIZE"
                 --root "$FM_ROOT" --cache-root "$CACHE_ROOT" --data-root "$DATA_ROOT")
-          if [ "$DATASET" = "synthetic-dev" ]; then args+=(--per-family "$PER_FAMILY"); fi
+          if [[ "$DATASET" == synthetic-* ]]; then args+=(--per-family "$PER_FAMILY"); fi
           bash .github/scripts/run-logged.sh "foundation build" "$VENV/bin/evolvets" \
             foundation build "${args[@]}"
       - name: Verify the cache against its manifest

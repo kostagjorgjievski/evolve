@@ -1,0 +1,135 @@
+name: Gate 1 learned-updater probe (real dev data)
+
+# Runs `evolvets gate1 probe` (TASK_014, W6) on the lab node that holds the dev
+# caches and foundation caches, one background process per piece (dataset:pool),
+# all over disjoint pools of one completed tune run. Ledgers go to the node's
+# persistent volume (AGENTS.md 2.8). CPU work: it never touches a GPU.
+# Owner-only, manual dispatch only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tune_run_id:
+        description: Completed tune run id to probe against
+        required: true
+      max_wall_seconds:
+        description: Wall-clock budget per piece in seconds (default two days)
+        default: "172800"
+      seed:
+        description: Updater seed
+        default: "0"
+      pieces:
+        description: Space-separated dataset:pool pieces
+        default: "etth1:simple etth1:simple+foundation ecl:simple ecl:simple+foundation synthetic-dev:simple synthetic-dev:simple+foundation"
+
+concurrency:
+  group: gate1-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: github.actor == github.repository_owner
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 3600
+    env:
+      UV_INDEX_URL: ${{ vars.GPU_PIP_INDEX_URL }}
+      UV_PYTHON_PREFERENCE: only-system
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - name: Get code (clean checkout of this commit)
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          find . -mindepth 1 -delete
+          git_fetch() {
+            git init -q . &&
+            git -c "http.extraheader=AUTHORIZATION: bearer ${TOKEN}" \
+              -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20 \
+              fetch -q --depth 1 --no-tags "https://github.com/${REPO}.git" "${SHA}" &&
+            git checkout -q FETCH_HEAD
+          }
+          got=0
+          for attempt in 1 2 3; do
+            if timeout 60 bash -c "$(declare -f git_fetch); git_fetch"; then
+              got=1
+              echo "Got ${SHA} with git (attempt ${attempt})"
+              break
+            fi
+            find . -mindepth 1 -delete
+            sleep 5
+          done
+          if [ "$got" -ne 1 ]; then
+            echo "::warning::git unavailable from $(hostname); tarball fallback used for github.sha=${SHA}; the recorded commit is a local one and must be mapped to ${SHA} in the results note"
+            curl -fsSL --retry 5 --retry-delay 10 --max-time 300 \
+              -H "Authorization: Bearer ${TOKEN}" \
+              "https://api.github.com/repos/${REPO}/tarball/${SHA}" \
+              | tar -xz --strip-components=1
+            # current_git_commit needs a git checkout with no modified files
+            git init -q . && git add -A >/dev/null && \
+              git -c user.name=ci -c user.email=ci@example.invalid commit -q -m "tarball of ${SHA}"
+          fi
+      - name: Paths
+        run: |
+          set -euo pipefail
+          base="${EVOLVETS_DATA:-/data}/evolve"
+          mkdir -p "$base/ledgers"
+          {
+            echo "DATA_ROOT=$base/data"
+            echo "CACHE_ROOT=$base/cache_store"
+            echo "FM_ROOT=$base/foundation_cache"
+            echo "LEDGER_ROOT=$base/ledgers"
+            echo "VENV=$base/venv-dev"
+          } >> "$GITHUB_ENV"
+      - name: Python environment from uv.lock
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bash .github/scripts/run-logged.sh "python env" bash .github/scripts/gpu-env.sh dev "$VENV"
+      - name: Probe pieces
+        env:
+          TUNE_RUN_ID: ${{ inputs.tune_run_id }}
+          MAX_WALL: ${{ inputs.max_wall_seconds }}
+          SEED: ${{ inputs.seed }}
+          PIECES: ${{ inputs.pieces }}
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          test -z "$(git status --porcelain)" || { echo "dirty tree"; git status --porcelain; exit 1; }
+          logdir="$(mktemp -d)"
+          pids=()
+          names=()
+          i=0
+          for piece in $PIECES; do
+            d="${piece%%:*}"
+            p="${piece#*:}"
+            i=$((i + 1))
+            "$VENV/bin/evolvets" gate1 probe --tune-run "$TUNE_RUN_ID" \
+              --dataset "$d" --pool-spec "$p" --seed "$SEED" \
+              --max-wall-seconds "$MAX_WALL" \
+              --ledger-root "$LEDGER_ROOT" --cache-root "$CACHE_ROOT" \
+              --foundation-root "$FM_ROOT" --data-root "$DATA_ROOT" \
+              --manifest-dir data/manifests > "$logdir/piece-$i.log" 2>&1 &
+            pids+=("$!")
+            names+=("$piece")
+          done
+          ok=1
+          ids=()
+          for idx in "${!pids[@]}"; do
+            set +e
+            wait "${pids[$idx]}"
+            code=$?
+            set -e
+            n=$((idx + 1))
+            echo "=== piece ${names[$idx]} (exit $code)"
+            cat "$logdir/piece-$n.log"
+            first="$(head -n1 "$logdir/piece-$n.log")"
+            case "$first" in
+              "OK "*) ids+=("$(echo "$first" | cut -d' ' -f2)") ;;
+              "FAIL "*) rid="$(echo "$first" | cut -d' ' -f2)"
+                        case "$rid" in gate1-probe-*) ids+=("$rid") ;; esac ;;
+            esac
+            if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then ok=0; fi
+          done
+          echo "PROBE_RUN_IDS=${ids[*]}"
+          [ "$ok" -eq 1 ]

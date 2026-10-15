@@ -1,4 +1,4 @@
-Status: active
+Status: done (PR A merged as #112; PR B as #113, with refactor #114; PR C as #115; PR D split by the size rule into data #117 and rendering #119; W6 #120 and W7 #121/#124 applied by the owner's delegate; PR E as #128 adds the results note and closes the task)
 
 # Task 014: learned-updater probe on dev (research question 1)
 

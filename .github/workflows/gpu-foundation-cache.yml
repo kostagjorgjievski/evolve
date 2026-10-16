@@ -127,8 +127,23 @@ jobs:
           args=(--dataset "$DATASET" --model "$MODEL" --device cuda --batch-size "$BATCH_SIZE"
                 --root "$FM_ROOT" --cache-root "$CACHE_ROOT" --data-root "$DATA_ROOT")
           if [[ "$DATASET" == synthetic-* ]]; then args+=(--per-family "$PER_FAMILY"); fi
-          bash .github/scripts/run-logged.sh "foundation build" "$VENV/bin/evolvets" \
-            foundation build "${args[@]}"
+          # sp-1 is shared: when another user's job exhausts RAM, the kernel's
+          # OOM killer picks our build first (the runner gives its jobs
+          # oom_score_adj 500). The build resumes from its partial directory,
+          # so a SIGKILL (137) is retried in place after a pause.
+          attempt=1
+          while :; do
+            set +e
+            bash .github/scripts/run-logged.sh "foundation build" "$VENV/bin/evolvets" \
+              foundation build "${args[@]}"
+            code=$?
+            set -e
+            [ "$code" -eq 0 ] && break
+            if [ "$code" -ne 137 ] || [ "$attempt" -ge 6 ]; then exit "$code"; fi
+            echo "::warning title=OOM kill?::foundation build got SIGKILL (exit 137) on attempt ${attempt}; resuming in 5 minutes"
+            attempt=$((attempt + 1))
+            sleep 300
+          done
       - name: Verify the cache against its manifest
         run: |
           export PATH="$HOME/.local/bin:$PATH"

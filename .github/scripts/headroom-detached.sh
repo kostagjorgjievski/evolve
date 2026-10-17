@@ -24,7 +24,7 @@ if timeout 120 git clone -q --depth 1 "https://github.com/$repo.git" . 2>/dev/nu
   echo "git checkout $(git rev-parse HEAD)"
 else
   find . -mindepth 1 -delete
-  sha="$(curl -fsSL --retry 5 "https://api.github.com/repos/$repo/commits/main" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')" || exit 1
+  sha="$(curl -fsSL --retry 5 "https://api.github.com/repos/$repo/commits/main" | "$base/venv-dev/bin/python" -c 'import json,sys; print(json.load(sys.stdin)["sha"])')" || exit 1
   curl -fsSL --retry 5 --max-time 300 "https://api.github.com/repos/$repo/tarball/$sha" | tar -xz --strip-components=1 || exit 1
   git init -q . && git add -A >/dev/null && git -c user.name=ci -c user.email=ci@example.invalid commit -q -m "tarball of $sha"
   echo "tarball of main $sha recorded as local commit $(git rev-parse HEAD)"

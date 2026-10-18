@@ -99,6 +99,23 @@ jobs:
           wc -l out/headroom-scan.md
           sha256sum out/headroom-scan.md
           cat out/headroom-scan.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the report as notice annotations (dev numbers only)
+        run: |
+          # artifacts can't be fetched from the agent sessions; annotations can
+          "$VENV/bin/python" -I - out/headroom-scan.md <<'PY'
+          import sys
+          text = open(sys.argv[1], encoding="utf-8").read()
+          chunks, current = [], ""
+          for line in text.splitlines(keepends=True):
+              if len(current) + len(line) > 3000 and current:
+                  chunks.append(current)
+                  current = ""
+              current += line
+          chunks.append(current)
+          for number, chunk in enumerate(chunks, 1):
+              body = chunk.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::notice title=headroom-scan {number:02d}/{len(chunks):02d}::{body}")
+          PY
       - name: Upload the report (dev numbers only)
         uses: actions/upload-artifact@v4
         with:

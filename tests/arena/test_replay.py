@@ -14,7 +14,7 @@ from evolvets.arena.labels import LabelRelease
 from evolvets.arena.replay import SEED_LIMIT, replay_series, series_seed
 from evolvets.cache.store import SeriesForecasts
 from evolvets.experts.pool import EXPERT_NAMES, first_origin, run_pool
-from evolvets.updater.interfaces import Context, Matured
+from evolvets.updater.interfaces import Context, ForecastOutput, Matured
 
 SRC = Path(__file__).parents[2] / "src" / "evolvets"
 E = len(EXPERT_NAMES)
@@ -585,3 +585,203 @@ def test_replay_reads_values_only_through_label_release():
     used = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == "values"]
     assert len(used) == 2
     assert all(id(node) in allowed for node in used)
+
+
+# --- TASK_016 PR A: the forecast-v2 updater interface ------------------------------------------
+
+
+CONST_ROW = (0.5, -1.25, 2.0, 0.0, 0.75)
+
+
+class ConstantForecast:
+    """A forecast-v2 updater answering with one fixed row; records the feedback it gets."""
+
+    def __init__(self, row):
+        self.row = tuple(row)
+        self.feedbacks = []
+
+    def init(self, n_experts, horizon, config, seed):
+        return None
+
+    def update(self, state, feedback, context):
+        self.feedbacks.append(feedback)
+        return (ForecastOutput(tuple(self.row)), None)
+
+
+class Alternating:
+    """Equal weights on even steps, a fixed forecast row on odd steps (forecast-v2)."""
+
+    def __init__(self, row):
+        self.row = tuple(row)
+
+    def init(self, n_experts, horizon, config, seed):
+        return None
+
+    def update(self, state, feedback, context):
+        if context.step % 2 == 0:
+            return (equal_weights(context.horizon), None)
+        return (ForecastOutput(tuple(self.row)), None)
+
+
+class SelfCombined:
+    """Records every (feedback, context); answers with its own equal-weight combination.
+
+    The combination follows the replay's own loop order, so under forecast-v2
+    its trace is bit-identical to a weights-v1 equal-weights replay.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def init(self, n_experts, horizon, config, seed):
+        return None
+
+    def update(self, state, feedback, context):
+        self.calls.append((feedback, context))
+        weight = 1.0 / len(context.expert_names)
+        out = []
+        for h in range(context.horizon):
+            total = 0.0
+            for row in context.forecasts:
+                total = total + weight * row[h]
+            out.append(total)
+        return (ForecastOutput(tuple(out)), None)
+
+
+class RecordingEqualWeights:
+    """Records every (feedback, context); returns equal weights under weights-v1."""
+
+    def __init__(self):
+        self.calls = []
+
+    def init(self, n_experts, horizon, config, seed):
+        return None
+
+    def update(self, state, feedback, context):
+        self.calls.append((feedback, context))
+        return (equal_weights(context.horizon), None)
+
+
+@pytest.mark.parametrize("bad", ["weights-v2", "", None, 1])
+def test_interface_checked_before_anything_runs(bad):
+    """An unknown interface is refused before validation, cache reads or init."""
+    spy = Spy()
+    with pytest.raises(ArenaError, match="interface"):
+        replay5(spy, interface=bad)
+    assert spy.init_args is None
+
+
+def test_forecast_output_refused_under_weights_v1():
+    """A ForecastOutput under weights-v1 is invalid_weights: it is no weights container."""
+    with pytest.raises(UpdaterFailure) as exc:
+        replay5(BadWeights(ForecastOutput((0.2,) * H5), fail_step=3))
+    assert exc.value.kind == "invalid_weights"
+    assert exc.value.step == 3
+
+
+def test_forecast_output_scores_as_given():
+    """forecast-v2 scores a row exactly as given: trace and Matured errors are c[h] - target."""
+    updater = ConstantForecast(CONST_ROW)
+    trace = replay5(updater, interface="forecast-v2")
+    assert len(trace.errors) == N_ORIGINS
+    for o in range(N_ORIGINS):
+        for h in range(H5):
+            assert trace.errors[o][h] == CONST_ROW[h] - VALS5[o + 1 + h]
+    # feedback for step s arrives exactly at s + H; its combined_errors are the same values
+    for k, feedback in enumerate(updater.feedbacks):
+        if k < H5:
+            assert feedback == (), f"step {k}"
+            continue
+        assert len(feedback) == 1, f"step {k}"
+        matured = feedback[0]
+        assert matured.step == k - H5
+        for h in range(H5):
+            assert matured.combined_errors[h] == CONST_ROW[h] - VALS5[(k - H5) + 1 + h]
+
+
+def test_mixed_outputs():
+    """Weights and forecasts may alternate: each trace row is one or the other, per step."""
+    row = tuple(0.3 + 0.1 * h for h in range(H5))
+    trace = replay5(Alternating(row), interface="forecast-v2")
+    weights = equal_weights(H5)
+    for o in range(N_ORIGINS):
+        for h in range(H5):
+            if o % 2 == 0:
+                assert trace.errors[o][h] == combine(weights, ROWS5, o, h) - VALS5[o + 1 + h]
+            else:
+                assert trace.errors[o][h] == row[h] - VALS5[o + 1 + h]
+
+
+def test_forecast_v2_equivalent_to_weights_v1():
+    """Self-combining equal weights under forecast-v2 replays bit-identically to weights-v1."""
+    assert replay5(SelfCombined(), interface="forecast-v2") == replay5(
+        FixedWeights(equal_weights(H5))
+    )
+
+
+class FloatSubclass(float):
+    """A benign float subclass: still not an exact float."""
+
+
+class RaisingIter:
+    """An object whose __iter__ raises."""
+
+    def __iter__(self):
+        raise RuntimeError("iter boom")
+
+
+class ForecastSubclass(ForecastOutput):
+    """A ForecastOutput subclass: not an exact ForecastOutput."""
+
+
+def _invalid_forecast_cases():
+    nan_row = (float("nan"), 0.2, 0.2, 0.2, 0.2)
+    inf_row = (float("inf"), 0.2, 0.2, 0.2, 0.2)
+    neg_inf_row = (float("-inf"), 0.2, 0.2, 0.2, 0.2)
+    bool_row = (True, 0.2, 0.2, 0.2, 0.2)
+    huge_int_row = (10**400, 0.0, 0.0, 0.0, 0.0)
+    subclass_row = (FloatSubclass(0.2), 0.2, 0.2, 0.2, 0.2)
+    return [
+        ("wrong_length", ForecastOutput((0.1, 0.2, 0.3))),
+        ("nan", ForecastOutput(nan_row)),
+        ("inf", ForecastOutput(inf_row)),
+        ("neg_inf", ForecastOutput(neg_inf_row)),
+        ("too_large", ForecastOutput((1e13, 0.0, 0.0, 0.0, 0.0))),
+        ("huge_int", ForecastOutput(huge_int_row)),
+        ("bool", ForecastOutput(bool_row)),
+        ("float_subclass", ForecastOutput(subclass_row)),
+        ("generator", ForecastOutput(v for v in (0.2,) * H5)),
+        ("output_subclass", ForecastSubclass((0.2,) * H5)),
+        ("iter_raises", ForecastOutput(RaisingIter())),
+    ]
+
+
+@pytest.mark.parametrize(
+    "name,bad", _invalid_forecast_cases(), ids=[c[0] for c in _invalid_forecast_cases()]
+)
+def test_invalid_forecasts_rejected(name, bad):
+    """Each malformed forecast output fails as failed/invalid_forecast at the failing step."""
+    with pytest.raises(UpdaterFailure) as exc:
+        replay5(BadWeights(bad, fail_step=3), interface="forecast-v2")
+    assert exc.value.kind == "failed"
+    assert exc.value.message.startswith("invalid_forecast:")
+    assert exc.value.step == 3
+
+
+def test_no_new_information_reaches_a_forecast_v2_updater():
+    """A forecast-v2 updater receives exactly what a weights-v1 updater receives.
+
+    Both return the same combination here — the forecast-v2 one through its
+    own self-combination — so every Context and Matured is field-for-field
+    equal, and feedback for step s still arrives exactly at s + H.
+    """
+    weights_updater = RecordingEqualWeights()
+    forecast_updater = SelfCombined()
+    replay5(weights_updater)
+    replay5(forecast_updater, interface="forecast-v2")
+    assert forecast_updater.calls == weights_updater.calls
+    for k, (feedback, _context) in enumerate(forecast_updater.calls):
+        if k < H5:
+            assert feedback == (), f"step {k}"
+        else:
+            assert len(feedback) == 1 and feedback[0].step == k - H5, f"step {k}"

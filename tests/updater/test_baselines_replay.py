@@ -53,13 +53,16 @@ def synthetic_pool(tmp_path_factory: pytest.TempPathFactory):
 #: but they change when a PR bumps ARENA_VERSION (the version string is inside the
 #: hashed object); arena version 3 (the oracles) repinned them, and
 #: tests/arena/test_oracles.py test 10 proves only the version string changed by
-#: stamping "2" back in and matching version 2's digests.
+#: stamping "2" back in and matching version 2's digests. Arena version 4 (the
+#: forecast-v2 interface) repinned them again: the result object gained
+#: ``updater_interface``, and test_oracles.py's version-4 test proves nothing else
+#: changed by stamping "3" back in, dropping that key, and matching version 3.
 GOLDEN_DIGESTS = {
-    "equal": "b6757835b23886016c8dec28abe15167652e034cbe37fda58bd513ed19425db8",
-    "ftl": "7f58dd10fbfc79c724589767ecc9155d1fa61ba509de63194fc1412b78a6cb08",
-    "hedge": "f11dda9d21b674ceba2e7ac3797330b1ca9a2f6a503a00cde4dce4f86ce55e71",
-    "fixed_share": "15433e67fa521829145ad41c111408ab99136b113e74441c1545099b2d52d2b2",
-    "adahedge": "ecbfbe3e82c9169c6c3e5a7b21118627f54ae057eca677f96dc9c20c52067ade",
+    "equal": "ffb5eef1675a218c010bad776d868a18720671edefb9d601378bcc981d3029b9",
+    "ftl": "ab862a04ea62a7ae450bf935ec8942cd873207e6a9c19a3f227e67e2e3945262",
+    "hedge": "73ea9ec16a7256746ba1fee991abb39c3b691f04c872742daeccba3dc38df645",
+    "fixed_share": "e9faa5d2898e55d4686d51a5bec3ec6f98b1ae40f4274e0d8bb1654d804404d4",
+    "adahedge": "85d936092809870f58f8bbbe52838d169e4f7e105a2c19976cd29d912a7f2eae",
 }
 
 

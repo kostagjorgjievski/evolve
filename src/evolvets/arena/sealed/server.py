@@ -225,6 +225,7 @@ def _replay(
             "dataset": pool.dataset,
             "cache_id": pool.cache_id,
             "arena_version": ARENA_VERSION,
+            "updater_interface": "weights-v1",
             "pool_spec": pool.pool_spec,
             "foundation_cache_ids": [cache.cache_id for cache in pool.foundation],
             "leakage_risk": pool_leakage_risk(pool.dataset, pool.foundation),

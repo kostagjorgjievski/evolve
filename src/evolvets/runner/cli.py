@@ -13,7 +13,7 @@ from typing import cast
 from evolvets import __version__
 from evolvets.arena.dev import DevPool, load_dev_pool
 from evolvets.arena.errors import ArenaError
-from evolvets.arena.evaluate import replay_dataset, result_to_obj
+from evolvets.arena.evaluate import UpdaterFactory, replay_dataset, result_to_obj
 from evolvets.arena.oracles import oracle_dataset, oracle_to_obj
 from evolvets.arena.pool import POOL_SPECS
 from evolvets.arena.realdata import sources
@@ -65,6 +65,11 @@ from evolvets.runner.gate1_sealed import plan_from_tune_run, sealed_run
 from evolvets.runner.gate1_tune import DevPaths, TuneSpec, tune
 from evolvets.runner.runs import RunError, current_git_commit, new_run_id
 from evolvets.updater.baselines import BASELINE_IDS, BASELINES, DEFAULT_CONFIGS
+from evolvets.updater.forecast import (
+    FORECAST_DEFAULT_CONFIGS,
+    FORECAST_UPDATER_IDS,
+    FORECAST_UPDATERS,
+)
 from evolvets.updater.interfaces import ConfigValue
 
 _DATASET_ORDER = ("etth1", "ecl")
@@ -345,15 +350,15 @@ def build_parser() -> argparse.ArgumentParser:
         )
     arena_replay.add_argument(
         "--updater",
-        choices=BASELINE_IDS,
+        choices=[*BASELINE_IDS, *FORECAST_UPDATER_IDS],
         required=True,
-        help="which baseline updater to replay",
+        help="which updater to replay (baselines replay weights-v1, forecast updaters forecast-v2)",
     )
     arena_replay.add_argument(
         "--config",
         type=_json_object,
         metavar="JSON",
-        help="updater config as a JSON object (default: the baseline's DEFAULT_CONFIGS entry)",
+        help="updater config as a JSON object (default: the updater's default config entry)",
     )
     arena_replay.add_argument("--seed", type=int, default=0, help="updater seed (default: 0)")
 
@@ -845,14 +850,29 @@ def _arena_pool(args: argparse.Namespace) -> DevPool:
 
 
 def _cmd_arena_replay(args: argparse.Namespace) -> int:
-    """Replay one baseline over a dev pool; one JSON line, FAIL on an ArenaError."""
+    """Replay one updater over a dev pool; one JSON line, FAIL on an ArenaError.
+
+    Baseline ids replay the weights-v1 contract with their ``DEFAULT_CONFIGS``
+    entry; forecast-updater ids replay forecast-v2 with their
+    ``FORECAST_DEFAULT_CONFIGS`` entry (``--config`` overrides either), and the
+    printed result carries the interface through ``result_to_obj``.
+    """
+    factory: UpdaterFactory
+    if args.updater in FORECAST_UPDATERS:
+        factory = FORECAST_UPDATERS[args.updater]
+        defaults: Mapping[str, Mapping[str, ConfigValue]] = FORECAST_DEFAULT_CONFIGS
+        interface = "forecast-v2"
+    else:
+        factory = BASELINES[args.updater]
+        defaults = DEFAULT_CONFIGS
+        interface = "weights-v1"
     config: Mapping[str, ConfigValue] = (
-        args.config if args.config is not None else DEFAULT_CONFIGS[args.updater]
+        args.config if args.config is not None else defaults[args.updater]
     )
     try:
         pool = _arena_pool(args)
         started = time.monotonic()
-        result = replay_dataset(BASELINES[args.updater], config, args.seed, pool)
+        result = replay_dataset(factory, config, args.seed, pool, interface=interface)
     except ArenaError as exc:
         print(f"FAIL {args.dataset}: {exc}")
         return 1

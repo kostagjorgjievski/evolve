@@ -1,18 +1,19 @@
-"""Tests for the forecast-output updaters (TASK_016 PR B, tests 1-9 and 11).
+"""Tests for the forecast-output updaters (TASK_016 PR B: tests 1-11).
 
 The unit tests drive ``init``/``update`` directly with hand-built Context and
 Matured objects; the replay tests run ``replay_series`` over hand-built
 forecasts (``tests/updater/test_learned.py``'s ``HandForecasts`` pattern), and
 the arena tests replay the synthetic-dev fixture of
 ``tests/updater/test_baselines_replay.py``. Test 10 (the CLI) and the
-``arena replay`` dispatch moved to ``feat/forecast-updater-cli`` under the
-task's size split; they follow this PR in the stack.
+``arena replay`` dispatch were split into ``feat/forecast-updater-cli`` under
+the task's size rule; they live here with the rest.
 """
 
 from __future__ import annotations
 
 import ast
 import importlib
+import json
 import random
 from hashlib import sha256
 from pathlib import Path
@@ -27,6 +28,7 @@ from evolvets.arena.replay import replay_series
 from evolvets.cache.datasets import public_inputs
 from evolvets.cache.store import build_cache
 from evolvets.ledger.canonical import canonical_bytes
+from evolvets.runner import cli
 from evolvets.updater.baselines import BASELINE_IDS, FixedShare, fixed_share
 from evolvets.updater.forecast import (
     FORECAST_DEFAULT_CONFIGS,
@@ -459,7 +461,63 @@ def test_weights_v1_refusal() -> None:
     assert excinfo.value.step == 0
 
 
-# --- Test 11: import discipline (test 10, the CLI, moved to feat/forecast-updater-cli) ------------
+# --- Test 10: the CLI -----------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def cli_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """The paths of a synthetic-dev cache with one series per family, for the CLI."""
+    base = tmp_path_factory.mktemp("forecast-cli")
+    cache_root = base / "cache_store"
+    source, series = public_inputs("synthetic-dev", base, base, per_family=1)
+    build_cache("synthetic-dev", source, series, cache_root)
+    return {"base": base, "cache_root": cache_root}
+
+
+def _cli_replay(env: dict[str, Path], capsys: pytest.CaptureFixture[str], updater: str) -> Any:
+    """Run ``arena replay synthetic-dev --updater <id>``; one JSON line, its result object."""
+    code = cli.main(
+        [
+            "arena",
+            "replay",
+            "synthetic-dev",
+            "--updater",
+            updater,
+            "--cache-root",
+            str(env["cache_root"]),
+            "--data-root",
+            str(env["base"]),
+            "--manifest-dir",
+            str(env["base"]),
+        ]
+    )
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 1, out
+    assert code == 0
+    return json.loads(out[0])["result"]
+
+
+def test_cli_replays_bias_share_under_forecast_v2(
+    cli_env: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``arena replay --updater bias_share`` prints one ok forecast-v2 JSON line."""
+    result = _cli_replay(cli_env, capsys, "bias_share")
+    assert result["status"] == "ok"
+    assert result["updater_interface"] == "forecast-v2"
+    assert result["dataset"] == "synthetic-dev"
+    assert "series" not in result
+
+
+def test_cli_keeps_fixed_share_on_weights_v1(
+    cli_env: dict[str, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--updater fixed_share`` still prints a weights-v1 result."""
+    result = _cli_replay(cli_env, capsys, "fixed_share")
+    assert result["status"] == "ok"
+    assert result["updater_interface"] == "weights-v1"
+
+
+# --- Test 11: import discipline -----------------------------------------------------------------
 
 
 ALLOWED_IMPORTS = {

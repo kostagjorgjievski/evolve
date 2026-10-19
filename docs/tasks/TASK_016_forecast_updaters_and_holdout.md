@@ -44,8 +44,8 @@ This task gives Phase 1 its object space (PR A), a reference forecast-output upd
 
 ## Rules for all three PRs
 
-- **The only protocol change is PR A.** PR A changes `updater/interfaces.py`, `arena/replay.py`, `arena/evaluate.py` and `arena/__init__.py`. Nothing else in the arena protocol changes in this task. Nothing changes in `ledger/`, `PROTOCOL_KEYS`, `SCHEMA_VERSION`, `GENERATOR_VERSION`, `CACHE_VERSION`, any payload, label release, metrics or the oracles' definitions.
-- **The sealed path is not touched.** `arena/sealed/` always replays `weights-v1`, as now. It has no forecast-v2 request.
+- **The only protocol change is PR A.** PR A changes `updater/interfaces.py`, `arena/replay.py`, `arena/evaluate.py`, `arena/__init__.py` and, in one line only, `arena/sealed/server.py` (below). Nothing else in the arena protocol changes in this task. Nothing changes in `ledger/`, `PROTOCOL_KEYS`, `SCHEMA_VERSION`, `GENERATOR_VERSION`, `CACHE_VERSION`, any payload, label release, metrics or the oracles' definitions.
+- **The sealed path keeps replaying `weights-v1`.** `arena/sealed/` has no forecast-v2 request and its call into `replay_dataset` is unchanged. Its one change rides PR A: the hand-built timeout result object in `_replay` gains `"updater_interface": "weights-v1"` — the only value it can have there — so it keeps `result_to_obj`'s exact key set, as its docstring promises.
 - **Standard library only.** No new dependency.
 - **Updater modules** use only `+ - * /`, comparisons and `abs`, accumulated in explicit left-to-right loops, as in `updater/baselines.py`. That means no `**`, no `sum()` on floats, no `math.fsum` and no `statistics`.
 - **Seeds:** `bias_share` validates its seed and ignores it, like the baselines. The holdout worlds use `scan_world_seed` unchanged.
@@ -64,6 +64,7 @@ This PR changes the arena protocol (AGENTS.md 2.4):
 - The PR is labelled `protocol-change`. If the label does not exist, create it with `gh label create protocol-change --description "Changes a frozen protocol component"`.
 - The description explains the impact on existing results:
   - every weights-only score is unchanged;
+  - sealed timeout result objects gain `"updater_interface": "weights-v1"` and keep `result_to_obj`'s key set; no stored blob changes interpretation;
   - arena-3 and arena-4 results are never mixed in one table, which the reports already enforce through the protocol-version check;
   - the headroom scan's numbers stay arena-3 numbers.
 
@@ -147,6 +148,8 @@ def replay_dataset(
 
 `src/evolvets/arena/__init__.py`: `ARENA_VERSION = "4"`. The docstring gains one sentence: "Version 4 added the forecast-v2 updater interface (`updater/interfaces.py`): a forecast-v2 updater may return its own point forecast instead of weights; weights-v1 replays are bit-identical to version 3 apart from the version string and the recorded interface."
 
+`src/evolvets/arena/sealed/server.py` (one line only, in PR A): the hand-built timeout result object in `_replay` gains `"updater_interface": "weights-v1"`, placed directly after `"arena_version"` as in `result_to_obj`, keeping the docstring's promise of `result_to_obj`'s key set with `status = "timeout"`. `arena/sealed/` is already inside the arena protocol (`arena/__init__.py`), so this rides PR A's protocol change; the sealed server's replay call, and everything else in `arena/sealed/`, is unchanged.
+
 ### Exact behaviour
 
 **Interface check.** `replay_series` and `replay_dataset` raise `ArenaError` when `interface` is not in `UPDATER_INTERFACES`. The check happens before anything else runs: no `init` call, no cache read. A non-str value is rejected the same way.
@@ -176,7 +179,7 @@ def replay_dataset(
 
 **`replay_dataset`** passes `interface` through to every `replay_series` call. It stamps `updater_interface=interface` on every result: `ok`, `failed` and `invalid_weights` alike.
 
-**Callers that are not touched.** `gate1 tune`, `gate1 probe`, `arena replay` and the sealed server keep calling without `interface`, so they replay `weights-v1`. `oracle_dataset` has no updater, and its result changes only in `arena_version`.
+**Callers that are not touched.** `gate1 tune`, `gate1 probe`, `arena replay` and the sealed server keep calling `replay_dataset` without `interface`, so they replay `weights-v1` (the sealed server's only change is the timeout key above, not its replay call). `oracle_dataset` has no updater, and its result changes only in `arena_version`.
 
 ### Tests for PR A (all required)
 
@@ -185,7 +188,7 @@ In `tests/arena/test_replay.py` and `tests/arena/test_evaluate.py`, using update
 1. **Interface check:** `interface` values of `"weights-v2"`, `""`, `None` and `1` each raise `ArenaError` from both `replay_series` and `replay_dataset`, and a spy factory or `init` is never called.
 2. **Weights-v1 unchanged:**
    - Under `weights-v1`, an updater returning `ForecastOutput(...)` gives `invalid_weights`.
-   - Every existing test in `tests/arena/` and `tests/updater/` passes unchanged except the repinned digests (test 9).
+   - Every existing test in `tests/arena/` and `tests/updater/` passes unchanged except the digest adjustments listed in test 9 (the repins and the stamp-back drops) and the version-string updates of test 8.
 3. **Forecast output scores as given:** a forecast-v2 updater returns the same constant row `c` at every step on a hand-built series. The trace errors equal `c[h] - target` exactly, and the `combined_errors` it receives in `Matured` equal the same values.
 4. **Mixed outputs:** an updater alternates weights (even steps) and forecasts (odd steps). Each trace row equals the weighted combination or the forecast, respectively.
 5. **Equivalence:** a forecast-v2 updater that computes `sum_e w[e][h] * f[e][h]` itself, in the replay's loop order, from the same equal weights, gives a trace bit-identical to the weights-v1 equal-weights replay.
@@ -193,6 +196,7 @@ In `tests/arena/test_replay.py` and `tests/arena/test_evaluate.py`, using update
    - the wrong length;
    - NaN, `inf` and `-inf`;
    - `1e13`;
+   - an `int` element too large for a float (`10**400`): `float()` raises `OverflowError` inside the copy, caught and reported like any other read failure;
    - a `bool` element;
    - an element of a `float` subclass;
    - `values` given as a generator;
@@ -211,9 +215,10 @@ In `tests/arena/test_replay.py` and `tests/arena/test_evaluate.py`, using update
    - For each replay, `result_to_obj` with `"updater_interface"` removed and `"arena_version"` set to `"3"` must hash to its version-3 digest. For the oracle, `oracle_to_obj` with `"arena_version"` set to `"3"` must hash to its version-3 digest.
    - Then repin the version-4 digests in those three places. Their docstrings say version 4 repinned them and this test shows why.
    - The existing `VERSION2_DIGESTS` test keeps passing: stamp `"2"`, and drop `"updater_interface"`, in the same way. Adjust it in the same commit and explain why in the PR.
+   - The version-1 stamp-back in `tests/arena/test_pool.py` (`test_simple_pool_reproduces_version_1`) also drops `"updater_interface"`: add it to the `V2_EXTRA_KEYS` tuple of dropped keys — version 1's object has neither the pool fields nor the interface key — and adjust the test's docstring, which counts the dropped keys. `V1_GOLDEN_DIGEST` is unchanged. Explain why in the PR.
 10. **The pooled spec:** a forecast-v2 replay on the `simple+foundation` fixture pool (fake foundation adapter, as in the existing pool tests) is `ok`, with `pool_spec` and `foundation_cache_ids` stamped as for weights-v1.
 11. **Look-ahead guard still holds:** an existing look-ahead test (`LabelRelease` refusing a premature target) is re-run under `forecast-v2` through a forecast-v2 updater, and still raises at the same point. Parametrise the existing test; do not copy it.
-12. **Sealed path:** `tests/arena/test_sealed_server.py` passes unchanged except for the version string, and a sealed replay's result object carries `"updater_interface": "weights-v1"`.
+12. **Sealed path:** `tests/arena/test_sealed_server.py` passes unchanged except for the version string, and a sealed replay's result object carries `"updater_interface": "weights-v1"`. In `test_timeout_end_to_end`, the timeout blob's `result` key set equals `result_to_obj`'s key set exactly, and it carries `"updater_interface": "weights-v1"`.
 13. **Ledger and reports:** a `gate1 tune` fixture run now records `protocol_versions["arena"] == "4"`. `build_report_data` over one fixture run built under `"4"` and one hand-built run claiming `"3"` raises the existing protocol-mix `ReportError`.
 
 ### Dependencies
@@ -305,7 +310,7 @@ FORECAST_UPDATERS: Mapping[str, Callable[[], ForecastUpdater]]  # MappingProxyTy
 1. **Registry:**
    - `tuple(FORECAST_UPDATERS) == FORECAST_UPDATER_IDS`;
    - the mapping and the configs are read-only;
-   - the ids are disjoint from `BASELINE_IDS` and `LEARNED_IDS`.
+   - the ids are disjoint from `BASELINE_IDS` (`evolvets.updater.baselines`) and `LEARNED_IDS` (`evolvets.updater.learned`; the test imports it from there).
 2. **Config validation:** a missing key, an extra key, `bias_rate` of `-0.1`, `1.5`, NaN or `True`, and a bad `eta` or `alpha` each raise `ValueError`.
 3. **Reduces to Fixed-Share:** with `bias_rate = 0.0`, `replay_dataset(bias_share, cfg, 0, synthetic_pool, interface="forecast-v2")` has per-series MASE equal (`==`) to `replay_dataset(fixed_share, {"eta": 1.0, "alpha": 0.01}, 0, synthetic_pool)`.
 4. **Bias recursion by hand:** a 1-expert, horizon-2 hand-built series with a constant forecast offset `+d`. After the first maturation the bias moves toward `d` by exactly `bias_rate * (d - 0)`, and the later outputs equal the hand-computed values.

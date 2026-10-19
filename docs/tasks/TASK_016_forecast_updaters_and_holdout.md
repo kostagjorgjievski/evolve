@@ -107,7 +107,14 @@ class ForecastUpdater(Protocol):
 ```python
 def replay_series(
     updater: Updater | ForecastUpdater,
-    config, seed, series_id, forecasts, values, period, horizon, end_origin,
+    config,
+    seed,
+    series_id,
+    forecasts,
+    values,
+    period,
+    horizon,
+    end_origin,
     expert_names: Sequence[str] = EXPERT_NAMES,
     *,
     interface: str = "weights-v1",
@@ -330,7 +337,7 @@ About 120 lines of implementation and 200 of tests. There is no natural split. I
 
 ```python
 HOLDOUT_INDEX_START = 1000  # first scan index of every holdout replicate
-HOLDOUT_INDEX_STOP = 2000   # exclusive; the holdout range is [START, STOP)
+HOLDOUT_INDEX_STOP = 2000  # exclusive; the holdout range is [START, STOP)
 
 
 @dataclass(frozen=True)

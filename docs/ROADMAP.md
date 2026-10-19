@@ -58,6 +58,11 @@ Owner plan (#142): the object is the updater, under the option-B interface. Leve
 | 19 | `feat/phase1-runner` | (f) Run CLI with conditions and equal budget accounting; holdout scoring of accepted edits only; detached sp-1 launcher (`.github/scripts/`, owner-applied) | spec pending |
 | 20 | `exp/phase1-report` | (g) Report: gain per unit of compute, calibration, safe-inheritance rate, regenerable from the ledger | spec pending |
 | 21 | `feat/meta-replay` | (h) Meta level: revise the allocator and the self-model by replaying the ledger history against the frozen arena | spec pending |
+| 22 | `feat/practice-worlds` | (L3) Allocator also chooses series, presets and seeds per candidate; the system generates new practice worlds with the seeded grammar, aimed at where the current updater fails. Generated worlds use scan indexes below 1000 and are never part of the holdout | later task, after (e) |
+| 23 | `feat/live-loop` | (L4) Live loop: forecast live public series (ETT/electricity-style feeds), commit forecasts before targets arrive (builds on entry 13), revise from matured outcomes. Same architecture, later stage | later task, after (f) |
+| 24 | `feat/meta-improver-strategy` | (L5) Meta level also revises the improver's strategy (prompt, edit types, use of history) by replaying the ledger. The verifier is not freely self-edited: a verifier change must agree with fixed ground-truth anchors, the frozen arena metric on fixed fresh-seed sets the system never generates or selects on | later task, after (h) |
+
+Owner direction (#142, 2026-10-19): the goal is the full self-improving system (L2 to L5), not a paper. TASK_016 does not preclude entries 22 to 24: `forecast-v2` is the object interface for all levels, and the holdout replicates use a reserved seed range (from 1000) that practice-world generation and live-loop revision must not use or select on.
 
 ## Phase 2: training our own improvement model (questions 4 and 5)
 

@@ -1,4 +1,4 @@
-Status: active
+Status: done (PR A split by the size rule into #130 and #132; PR B into #133 and #134; W8–W10 workflows applied by the owner's delegate as #131, #136, #137, #138 and #139; the scan runs completed 2026-10-19, see #135; PR C as #140 adds the results note and closes the task)
 
 # Task 015: headroom scan before Phase 1
 

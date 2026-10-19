@@ -80,6 +80,8 @@ module = [
     "evolvets.updater.baselines",
     # TASK_014 PR A: updater/learned (PR B appends loss_gate to it).
     "evolvets.updater.learned",
+    # TASK_016 PR B: updater/forecast.
+    "evolvets.updater.forecast",
     # TASK_011: every new runner module joins the strict list (PR A: runs;
     # PR B: gate1_grids, gate1_tune; PR C1: gate1_report_data; PR C2: gate1_report).
     # TASK_012 PR A: gate1_sealed (split: plan first, run next).

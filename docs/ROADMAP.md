@@ -11,7 +11,7 @@ Owner of this file: the planner agent (`docs/agents/planner.md`). The developer 
 5. **Recursion:** does the improver become better at improving itself (fair races, knockouts, many lineages)?
 6. **Transfer:** does improving skill transfer to time-series tasks it never trained on?
 
-## Phase 0: the instrument (current)
+## Phase 0: the instrument (done)
 
 Goal: answer question 1 and have every piece of measurement infrastructure frozen and trustworthy before any agent edits anything.
 
@@ -33,7 +33,7 @@ Goal: answer question 1 and have every piece of measurement infrastructure froze
 | 11b | `exp/learned-probe` | Learned-updater probe on dev (research question 1, owner request #110): two learned updaters (`ridge_stack`, `loss_gate`) replayed in recorded runs against the best tuned baseline of the first dev tune run, with per-pool bootstrap verdicts in the dev report and a results note | merged (#112, #113, #114, #115, #117, #119; results note in #128, `docs/results/gate1-learned-probe.md`) |
 | 11c | `exp/headroom-scan` | Headroom scan before Phase 1 (owner request #125): seeded generator presets of increasing severity plus a wide replicate as new dev datasets, tuned with `gate1 tune`, and a ranked headroom table (best tuned baseline vs switching oracles, best expert per series, true-best) with paired bootstrap intervals and a recommendation by a pre-fixed rule. Hard real domains (#125 candidate 2) wait for owner decisions | merged (#130, #132, #133, #134; results note in #140, `docs/results/headroom-scan.md`) |
 
-**Gate 1 decision:** if headroom over the best tuned baseline is small, harden the generator (PR 5) before Phase 1.
+**Gate 1 decision:** if headroom over the best tuned baseline is small, harden the generator (PR 5) before Phase 1. *Decided by the owner on 2026-10-19 (#141, #142): Phase 1 runs on `synthetic-shift3` and `synthetic-shift2`, pool `simple+foundation`, with forecast-output updaters (option B); `synthetic-shift1` and `synthetic-wide` are secondary checks.*
 
 Parallel track (PR 8 has landed; entry 12 approved by the owner on 2026-10-12):
 
@@ -42,9 +42,22 @@ Parallel track (PR 8 has landed; entry 12 approved by the owner on 2026-10-12):
 | 12 | `feat/foundation-experts` | Chronos-2, TiRex, TimesFM 2.5 as cached experts, built on the lab GPU (approved; TASK_009). Toto dropped: needs torch 2.7 or Python 3.12 (issue #64). Moirai 2.0 dropped: uni2ts needs torch<2.5 and the license is non-commercial (issue #66). Revisit if the project's torch/Python pins change | merged (#56, #57, #58, #61, #63, #70, #72, #76) |
 | 13 | `feat/live-commit` | Daily public, timestamped forecast commitments from generation 0 onward | spec pending |
 
-## Phase 1: the loop with an API LLM (questions 2 and 3)
+## Phase 1: the loop with an API LLM (questions 2 and 3) (current)
 
-Improver (proposal program, editable), self-model (per-proposal gain quantiles), allocator slot with rival allocators (BO, bandit, random, shuffled), runner with experimental conditions and equal budget accounting, Goodhart diagnostics. Specs written after Gate 1.
+Improver (proposal program, editable), self-model (per-proposal gain quantiles), allocator slot with rival allocators (BO, bandit, random, shuffled), runner with experimental conditions and equal budget accounting, Goodhart diagnostics.
+
+Owner plan (#142): the object is the updater, under the option-B interface. Level L2 is an LLM improver proposing edits, a self-model predicting each edit's gain before evaluation (logged and flushed first, AGENTS.md 2.3), and an allocator choosing what to evaluate under a fixed evaluation budget. Level L5 revises the allocator and the self-model by replaying the ledger's improvement history against the frozen arena. The baselines run at equal budget: evaluate-everything with replay selection, a fixed allocator, random, a bandit, Bayesian optimisation, and a weights-only object space. The metrics are best-so-far dev MASE gain per unit of compute, self-model calibration, and the safe-inheritance rate (the share of accepted edits that hurt on the fresh-seed holdout). The entries are in #142's order.
+
+| # | Branch | Content | Status |
+|---|---|---|---|
+| 14 | `protocol/forecast-updaters` + `feat/forecast-updater-reference` | (a) Updater interface `forecast-v2` beside `weights-v1`, `ARENA_VERSION = "4"` with weights-only scores unchanged; reference forecast-output updater `bias_share` | TASK_016 |
+| 15 | `feat/holdout-replicates` | (b) Fresh-seed holdout replicates `synthetic-shift2-holdout` and `synthetic-shift3-holdout` (scan indexes from 1000), never tuned on; owner-dispatched cache builds (W11) | TASK_016 |
+| 16 | `feat/improver-harness` | (c) LLM improver: recorded prompts and responses as blobs, token accounting, `proposal` records, replay from recorded responses | spec pending: waits for the owner's LLM decisions (#143) |
+| 17 | `feat/selfmodel` | (d) Self-model: per-proposal gain quantiles, `prediction` records flushed before evaluation | spec pending |
+| 18 | `feat/allocators` | (e) Allocator slot, the self-model allocator and the rival allocators (fixed, random, bandit, BO, evaluate-everything with replay selection) | spec pending |
+| 19 | `feat/phase1-runner` | (f) Run CLI with conditions and equal budget accounting; holdout scoring of accepted edits only; detached sp-1 launcher (`.github/scripts/`, owner-applied) | spec pending |
+| 20 | `exp/phase1-report` | (g) Report: gain per unit of compute, calibration, safe-inheritance rate, regenerable from the ledger | spec pending |
+| 21 | `feat/meta-replay` | (h) Meta level: revise the allocator and the self-model by replaying the ledger history against the frozen arena | spec pending |
 
 ## Phase 2: training our own improvement model (questions 4 and 5)
 

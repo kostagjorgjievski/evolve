@@ -24,8 +24,8 @@ from evolvets.arena.metrics import (
     recovery_times,
 )
 from evolvets.arena.pool import load_pool_forecasts, pool_expert_names, pool_leakage_risk
-from evolvets.arena.replay import SeriesTrace, replay_series
-from evolvets.updater.interfaces import ConfigValue, Updater
+from evolvets.arena.replay import SeriesTrace, _checked_interface, replay_series
+from evolvets.updater.interfaces import ConfigValue, ForecastUpdater, Updater
 
 ResultStatus = Literal["ok", "failed", "invalid_weights"]  # the ledger's minus timeout
 
@@ -53,9 +53,10 @@ class ReplayResult:
     failed_step: int | None
     metrics: dict[str, float]  # {} unless ok
     series: tuple[SeriesScore, ...]  # () unless ok
+    updater_interface: str  # one of UPDATER_INTERFACES
 
 
-UpdaterFactory = Callable[[], Updater]  # zero-argument; called once per series
+UpdaterFactory = Callable[[], Updater | ForecastUpdater]  # zero-argument; called once per series
 
 
 def replay_dataset(
@@ -63,14 +64,20 @@ def replay_dataset(
     config: Mapping[str, ConfigValue],
     seed: int,
     pool: DevPool,
+    *,
+    interface: str = "weights-v1",
 ) -> ReplayResult:
     """Replay a fresh updater over every series of ``pool``, in pool order, and score it.
 
-    An :class:`UpdaterFailure` stops the replay as a failed result;
+    ``interface`` selects the updater contract (``weights-v1`` by default) and
+    is checked before anything runs, then passed to every
+    :func:`~evolvets.arena.replay.replay_series` call and stamped on the
+    result. An :class:`UpdaterFailure` stops the replay as a failed result;
     :class:`ArenaError` (a bad pool or cache) propagates, since it is not the
     updater's fault. Nothing here charges a budget: the caller wraps it and
     charges every condition equally (AGENTS.md 2.5).
     """
+    interface = _checked_interface(interface)
     names = pool_expert_names(pool)
     scores: list[SeriesScore] = []
     for series in pool.series:
@@ -88,6 +95,7 @@ def replay_dataset(
                 pool.manifest.horizon,
                 series.score_end,
                 expert_names=names,
+                interface=interface,
             )
         except UpdaterFailure as failure:
             return _result(
@@ -98,6 +106,7 @@ def replay_dataset(
                 failed_step=failure.step,
                 metrics={},
                 series=(),
+                updater_interface=interface,
             )
         scores.append(_score_series(series, trace))
     return _result(
@@ -108,6 +117,7 @@ def replay_dataset(
         failed_step=None,
         metrics=aggregate(scores),
         series=tuple(scores),
+        updater_interface=interface,
     )
 
 
@@ -120,6 +130,7 @@ def _result(
     failed_step: int | None,
     metrics: dict[str, float],
     series: tuple[SeriesScore, ...],
+    updater_interface: str,
 ) -> ReplayResult:
     """Build one replay result, stamping the version, the pool and the leakage flag."""
     return ReplayResult(
@@ -135,6 +146,7 @@ def _result(
         failed_step=failed_step,
         metrics=metrics,
         series=series,
+        updater_interface=updater_interface,
     )
 
 
@@ -146,11 +158,13 @@ def result_to_obj(result: ReplayResult) -> dict[str, object]:
     ``baseline`` records. ``pool_spec``, ``foundation_cache_ids`` and
     ``leakage_risk`` are result-level: the ledger's metrics dicts hold floats
     only, so the flag Gate 1 splits rows by cannot live inside them.
+    ``updater_interface`` names the contract the updater ran under.
     """
     return {
         "dataset": result.dataset,
         "cache_id": result.cache_id,
         "arena_version": result.arena_version,
+        "updater_interface": result.updater_interface,
         "pool_spec": result.pool_spec,
         "foundation_cache_ids": list(result.foundation_cache_ids),
         "leakage_risk": result.leakage_risk,

@@ -7,6 +7,9 @@ The updater sees expert forecasts and matured errors only, through
 the target series directly. Float arithmetic sticks to ``+ - * /``,
 comparisons and ``abs``, accumulated left-to-right in the order stated in
 docs/tasks/TASK_007_arena_replay.md, so traces are bit-identical everywhere.
+An updater runs under one interface (``weights-v1`` or ``forecast-v2``); a
+forecast-v2 updater may answer with its own forecast row, which the arena
+copies, validates and scores as given, without further arithmetic.
 """
 
 from collections.abc import Mapping, Sequence
@@ -17,7 +20,16 @@ from typing import Protocol, cast
 from evolvets.arena.errors import ArenaError, UpdaterFailure
 from evolvets.arena.labels import LabelRelease
 from evolvets.experts.pool import EXPERT_NAMES
-from evolvets.updater.interfaces import ConfigValue, Context, Matured, Updater
+from evolvets.updater.interfaces import (
+    FORECAST_ABS_LIMIT,
+    UPDATER_INTERFACES,
+    ConfigValue,
+    Context,
+    ForecastOutput,
+    ForecastUpdater,
+    Matured,
+    Updater,
+)
 
 SEED_LIMIT = 2**63
 
@@ -49,6 +61,13 @@ def _require_int(name: str, value: object, minimum: int) -> int:
     if value < minimum:
         raise ArenaError(f"{name} must be >= {minimum}, got {value}")
     return value
+
+
+def _checked_interface(interface: object) -> str:
+    """Return ``interface`` when it names an updater interface, else raise ArenaError."""
+    if isinstance(interface, str) and interface in UPDATER_INTERFACES:
+        return interface
+    raise ArenaError(f"interface must be one of {UPDATER_INTERFACES}, got {interface!r}")
 
 
 def _checked_expert_names(expert_names: Sequence[str]) -> tuple[str, ...]:
@@ -169,8 +188,55 @@ def _validated_weights(
     return stored
 
 
+def _validated_forecast(
+    output: ForecastOutput, horizon: int, series_id: str, step: int
+) -> tuple[float, ...]:
+    """Type-check and copy a ForecastOutput the way ``_validated_weights`` copies.
+
+    Only an exact ``ForecastOutput`` holding an exact ``list``/``tuple`` of
+    exact ``int``/``float`` entries is accepted, so a subclass whose
+    ``__iter__`` lies cannot serve one contents to validation and another to
+    the trace. The returned copy is what was validated and what is scored.
+    """
+    try:
+        if type(output) is not ForecastOutput:
+            raise TypeError(f"output must be exactly ForecastOutput, got {type(output).__name__}")
+        raw: object = output.values  # updaters can put anything in the field; copy defensively
+        if type(raw) is not list and type(raw) is not tuple:
+            raise TypeError(f"values must be a list or a tuple, got {type(raw).__name__}")
+        entries: list[float] = []
+        for element in cast("Sequence[object]", raw):
+            if type(element) is not int and type(element) is not float:
+                raise TypeError(
+                    f"values entries must be int or float, got {type(element).__name__}"
+                )
+            entries.append(float(element))
+        stored = tuple(entries)
+    except Exception as exc:
+        raise UpdaterFailure(
+            "failed", f"invalid_forecast: {_failure_message(exc)}", series_id, step
+        ) from None
+    if len(stored) != horizon:
+        raise UpdaterFailure(
+            "failed",
+            f"invalid_forecast: values must have {horizon} entries, got {len(stored)}",
+            series_id,
+            step,
+        )
+    for value in stored:
+        if not _is_finite(value) or abs(value) > FORECAST_ABS_LIMIT:
+            raise UpdaterFailure(
+                "failed",
+                f"invalid_forecast: values entries must be finite with abs at most "
+                f"{FORECAST_ABS_LIMIT}, got {value!r}",
+                series_id,
+                step,
+            )
+    return stored
+
+
 def replay_series(
-    updater: Updater,
+    updater: Updater | ForecastUpdater,
     config: Mapping[str, ConfigValue],
     seed: int,
     series_id: str,
@@ -180,18 +246,26 @@ def replay_series(
     horizon: int,
     end_origin: int,
     expert_names: Sequence[str] = EXPERT_NAMES,
+    *,
+    interface: str = "weights-v1",
 ) -> SeriesTrace:
     """Replay one series: run the updater origin by origin and score its combinations.
 
     ``expert_names`` names the pool the forecasts hold, one name per forecast
-    row, in pool order; the default is the simple five. Feedback for origin
+    row, in pool order; the default is the simple five. ``interface`` selects
+    the updater contract: under ``weights-v1`` (the default) every output is
+    validated as weights, and a :class:`~evolvets.updater.interfaces.ForecastOutput`
+    is refused; under ``forecast-v2`` an exact ``ForecastOutput`` is validated
+    as this origin's own forecast and scored as given, and anything else is
+    validated as weights exactly as under ``weights-v1``. Feedback for origin
     ``s`` arrives at exactly
     ``s + horizon``, once, as :class:`~evolvets.updater.interfaces.Matured`;
     the last ``min(horizon, end_origin - first_origin)`` origins are matured
     in a final drain with no further ``update`` calls. Raises
-    :class:`UpdaterFailure` if the updater fails or returns invalid weights,
-    :class:`ArenaError` for bad arguments.
+    :class:`UpdaterFailure` if the updater fails or returns invalid weights
+    or forecasts, :class:`ArenaError` for bad arguments.
     """
+    interface = _checked_interface(interface)
     horizon = _require_int("horizon", horizon, 1)
     names = _checked_expert_names(expert_names)
     n_experts = len(names)
@@ -264,20 +338,25 @@ def replay_series(
             result: object = updater.update(state, feedback, context)
         except Exception as exc:
             raise UpdaterFailure("failed", _failure_message(exc), series_id, k) from None
+        noun = "an output" if interface == "forecast-v2" else "weights"
         if type(result) is not tuple:
-            raise UpdaterFailure("failed", "update must return (weights, state)", series_id, k)
+            raise UpdaterFailure("failed", f"update must return ({noun}, state)", series_id, k)
         pair = cast("tuple[object, object]", result)
         if len(pair) != 2:
-            raise UpdaterFailure("failed", "update must return (weights, state)", series_id, k)
-        stored = _validated_weights(pair[0], horizon, series_id, k, n_experts)
+            raise UpdaterFailure("failed", f"update must return ({noun}, state)", series_id, k)
+        if interface == "forecast-v2" and isinstance(pair[0], ForecastOutput):
+            # the validated copy is this origin's combined row, as given
+            combined.append(_validated_forecast(pair[0], horizon, series_id, k))
+        else:
+            stored = _validated_weights(pair[0], horizon, series_id, k, n_experts)
+            totals: list[float] = []
+            for h in range(horizon):
+                total = 0.0
+                for e in range(n_experts):
+                    total = total + stored[e][h] * current[e][h]
+                totals.append(total)
+            combined.append(tuple(totals))
         state = pair[1]
-        totals: list[float] = []
-        for h in range(horizon):
-            total = 0.0
-            for e in range(n_experts):
-                total = total + stored[e][h] * current[e][h]
-            totals.append(total)
-        combined.append(tuple(totals))
 
     for t in range(end_origin, end_origin + horizon):
         if t - horizon >= t0:

@@ -374,7 +374,9 @@ def test_oracle_to_obj_and_the_golden_digest(synthetic_pool) -> None:
     """Pin the canonical bytes of the synthetic-dev oracles (per_family = 1).
 
     Changing this digest means an oracle value changed: bump ARENA_VERSION
-    and repin it.
+    and repin it. Arena version 4 (the forecast-v2 interface) repinned it:
+    only the version string inside the hashed object changed, which the
+    version-4 test below proves by stamping "3" back in.
     """
     result = oracle_dataset(synthetic_pool)
     obj = oracle_to_obj(result)
@@ -390,7 +392,7 @@ def test_oracle_to_obj_and_the_golden_digest(synthetic_pool) -> None:
     assert obj["leakage_risk"] is False  # a synthetic dataset is no model's pretraining data
     canonical_bytes(obj)
     digest = sha256(canonical_bytes(obj)).hexdigest()
-    assert digest == "62b41507d8737af46cbb34d467a89f8046c6512d89d5795556f4cbc04e31027d"
+    assert digest == "64d10b7da7ec14eb20e7ed493300e0e6dddfac16a45b42089d1d47acc7dfa785"
 
 
 # --- Test 10: version 3 changes no score ---
@@ -410,16 +412,62 @@ VERSION2_DIGESTS = {
 }
 
 
+def _without_updater_interface(obj: dict[str, object]) -> dict[str, object]:
+    """Copy ``obj`` without the ``updater_interface`` key version 4 added."""
+    return {key: value for key, value in obj.items() if key != "updater_interface"}
+
+
 def test_version_3_changes_no_score(synthetic_pool) -> None:
-    """Every version-3 replay object, stamped back to "2", hashes to version 2's digest."""
-    golden = result_to_obj(replay_dataset(lambda: EqualWeights(), {}, 0, synthetic_pool))
+    """Every version-3 replay object, stamped back to "2", hashes to version 2's digest.
+
+    Version 4 added ``updater_interface`` to the result objects, so the
+    stamp-back drops that key too; the numbers themselves are still unchanged.
+    """
+    golden = _without_updater_interface(
+        result_to_obj(replay_dataset(lambda: EqualWeights(), {}, 0, synthetic_pool))
+    )
     stamped = {**golden, "arena_version": "2"}
     assert sha256(canonical_bytes(stamped)).hexdigest() == VERSION2_DIGESTS["equal"]
     for id_ in BASELINE_IDS:
         replay = replay_dataset(BASELINES[id_], DEFAULT_CONFIGS[id_], 0, synthetic_pool)
         assert replay.status == "ok"
-        stamped = {**result_to_obj(replay), "arena_version": "2"}
+        stamped = {**_without_updater_interface(result_to_obj(replay)), "arena_version": "2"}
         assert sha256(canonical_bytes(stamped)).hexdigest() == VERSION2_DIGESTS[id_], id_
+
+
+# --- Test 11: version 4 changes no score (TASK_016 PR A) -----------------------------------------
+
+
+#: Version 3's digests of the golden replay, the five baselines' replays and the
+#: oracle object (tests/arena/test_evaluate.py test 13,
+#: tests/updater/test_baselines_replay.py and test 9 above, before version 4
+#: repinned them). Stamping "3" back in — and dropping the ``updater_interface``
+#: key version 4's result objects gained — must reproduce them byte for byte:
+#: the bump changed the version string and the recorded interface and nothing else.
+VERSION3_DIGESTS = {
+    "equal": "b6757835b23886016c8dec28abe15167652e034cbe37fda58bd513ed19425db8",
+    "ftl": "7f58dd10fbfc79c724589767ecc9155d1fa61ba509de63194fc1412b78a6cb08",
+    "hedge": "f11dda9d21b674ceba2e7ac3797330b1ca9a2f6a503a00cde4dce4f86ce55e71",
+    "fixed_share": "15433e67fa521829145ad41c111408ab99136b113e74441c1545099b2d52d2b2",
+    "adahedge": "ecbfbe3e82c9169c6c3e5a7b21118627f54ae057eca677f96dc9c20c52067ade",
+}
+VERSION3_ORACLE_DIGEST = "62b41507d8737af46cbb34d467a89f8046c6512d89d5795556f4cbc04e31027d"
+
+
+def test_version_4_changes_no_score(synthetic_pool) -> None:
+    """Every version-4 replay object, stamped back to "3", hashes to version 3's digest."""
+    golden = _without_updater_interface(
+        result_to_obj(replay_dataset(lambda: EqualWeights(), {}, 0, synthetic_pool))
+    )
+    stamped = {**golden, "arena_version": "3"}
+    assert sha256(canonical_bytes(stamped)).hexdigest() == VERSION3_DIGESTS["equal"]
+    for id_ in BASELINE_IDS:
+        replay = replay_dataset(BASELINES[id_], DEFAULT_CONFIGS[id_], 0, synthetic_pool)
+        assert replay.status == "ok"
+        stamped = {**_without_updater_interface(result_to_obj(replay)), "arena_version": "3"}
+        assert sha256(canonical_bytes(stamped)).hexdigest() == VERSION3_DIGESTS[id_], id_
+    oracle = {**oracle_to_obj(oracle_dataset(synthetic_pool)), "arena_version": "3"}
+    assert sha256(canonical_bytes(oracle)).hexdigest() == VERSION3_ORACLE_DIGEST
 
 
 # --- Test 12: determinism ---

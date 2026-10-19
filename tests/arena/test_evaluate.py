@@ -249,6 +249,7 @@ RESULT_KEYS = {
     "dataset",
     "cache_id",
     "arena_version",
+    "updater_interface",
     "pool_spec",
     "foundation_cache_ids",
     "leakage_risk",
@@ -265,6 +266,14 @@ def test_result_to_obj_ok_and_failed(real_pool) -> None:
     ok = replay_dataset(lambda: EqualWeights(), {}, 0, real_pool)  # type: ignore[arg-type]
     obj = result_to_obj(ok)
     assert set(obj) == RESULT_KEYS
+    assert list(obj)[:5] == [
+        "dataset",
+        "cache_id",
+        "arena_version",
+        "updater_interface",
+        "pool_spec",
+    ]
+    assert obj["updater_interface"] == "weights-v1"
     assert obj["series"]
     assert set(obj["series"][0]) == {"series_id", "mase", "oracle_mase", "recovery"}
     assert isinstance(obj["series"][0]["recovery"], list)
@@ -282,6 +291,57 @@ def test_result_to_obj_ok_and_failed(real_pool) -> None:
     canonical_bytes(failed_obj)
 
 
+# --- The updater interface (TASK_016 PR A) ----------------------------------------------------
+
+
+class FactorySpy:
+    """A zero-argument factory that counts its calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> EqualWeights:
+        self.calls += 1
+        return EqualWeights()
+
+
+@pytest.mark.parametrize("bad", ["weights-v2", "", None, 1])
+def test_replay_dataset_checks_the_interface_first(bad, synthetic_pool) -> None:
+    """A bad interface is refused before the factory, init or any cache read runs."""
+    factory = FactorySpy()
+    with pytest.raises(ArenaError, match="interface"):
+        replay_dataset(factory, {}, 0, synthetic_pool, interface=bad)  # type: ignore[arg-type]
+    assert factory.calls == 0
+
+
+def test_updater_interface_is_stamped_on_every_result(real_pool) -> None:
+    """ok, failed and invalid_weights results carry the interface they replayed under."""
+    cases = [
+        (lambda: EqualWeights(), "weights-v1", "ok"),
+        (lambda: EqualWeights(), "forecast-v2", "ok"),  # weights stay valid under forecast-v2
+        (lambda: FailingUpdater("update", step=2), "weights-v1", "failed"),
+        (lambda: FailingUpdater("update", step=2), "forecast-v2", "failed"),
+        (lambda: FailingUpdater("invalid", step=1), "weights-v1", "invalid_weights"),
+        (lambda: FailingUpdater("invalid", step=1), "forecast-v2", "invalid_weights"),
+    ]
+    for factory, interface, status in cases:
+        result = replay_dataset(factory, {}, 0, real_pool, interface=interface)  # type: ignore[arg-type]
+        assert result.status == status
+        assert result.updater_interface == interface
+        assert result_to_obj(result)["updater_interface"] == interface
+
+
+def test_arena_version_is_4() -> None:
+    """Version 4 is the forecast-v2 interface bump; weights-only scores are unchanged.
+
+    test_oracles.py proves the "unchanged" half by stamping version 4's result
+    objects back to "3" (and dropping the interface key) and matching version
+    3's digests.
+    """
+    assert ARENA_VERSION == "4"
+    assert protocol_versions()["arena"] == "4"
+
+
 # --- Test 13: golden -------------------------------------------------------------------------
 
 
@@ -296,12 +356,16 @@ def test_golden_synthetic_equal_weights(synthetic_pool) -> None:
     tests/arena/test_pool.py proves the numbers themselves are unchanged.
     Arena version 3 (the oracles) repinned it again: only the version string
     inside the hashed object changed, which test_oracles.py test 10 proves by
-    stamping "2" back in and matching version 2's digest.
+    stamping "2" back in and matching version 2's digest. Arena version 4
+    (the forecast-v2 interface) repinned it once more: the result object
+    gained ``updater_interface``, and test_oracles.py proves nothing else
+    changed by stamping "3" back in, dropping that key, and matching
+    version 3's digest.
     """
     result = replay_dataset(lambda: EqualWeights(), {}, 0, synthetic_pool)  # type: ignore[arg-type]
     assert result.status == "ok"
     digest = sha256(canonical_bytes(result_to_obj(result))).hexdigest()
-    assert digest == "b6757835b23886016c8dec28abe15167652e034cbe37fda58bd513ed19425db8"
+    assert digest == "ffb5eef1675a218c010bad776d868a18720671edefb9d601378bcc981d3029b9"
 
 
 # --- Test 14: determinism and AST guards ------------------------------------------------------

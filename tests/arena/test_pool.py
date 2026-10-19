@@ -41,7 +41,7 @@ from tests.arena.test_dev import build_real_env
 # version 2): the simple pool under version 2 must reproduce it exactly once
 # the version stamp and the new pool fields are stripped.
 V1_GOLDEN_DIGEST = "83327d272555e2ef812af7f6adaf50d3f6cf8aa1d877f4043b1f904977ad58b3"
-V2_EXTRA_KEYS = ("pool_spec", "foundation_cache_ids", "leakage_risk")
+V2_EXTRA_KEYS = ("pool_spec", "foundation_cache_ids", "leakage_risk", "updater_interface")
 
 
 class EqualWeights:
@@ -162,10 +162,11 @@ def _custom_spec(name: str, etth1: str) -> ModelSpec:
 def test_simple_pool_reproduces_version_1(synthetic_env: dict[str, Path]) -> None:
     """A 'simple' replay under the current arena version equals version 1's golden numbers.
 
-    Stripping the three pool fields the version-2 result object added and
-    stamping the version back to 1 must give version 1's golden digest byte
-    for byte, so the pool work changed no forecast, weight or metric
-    arithmetic.
+    Stripping the four keys later result objects added — the three pool fields
+    of version 2 and the ``updater_interface`` key of version 4 — and stamping
+    the version back to 1 must give version 1's golden digest byte for byte,
+    so the pool work and the interface bump changed no forecast, weight or
+    metric arithmetic.
     """
     pool = load_dev_pool(
         "synthetic-dev",
@@ -179,8 +180,9 @@ def test_simple_pool_reproduces_version_1(synthetic_env: dict[str, Path]) -> Non
     assert result.pool_spec == "simple" and result.foundation_cache_ids == ()
     assert result.leakage_risk is False
     obj = result_to_obj(result)
-    assert obj["arena_version"] == "3"
-    assert protocol_versions()["arena"] == "3"
+    # version 4 is the forecast-v2 interface bump; this replay is weights-v1
+    assert obj["arena_version"] == "4"
+    assert protocol_versions()["arena"] == "4"
     v1_obj = {key: value for key, value in obj.items() if key not in V2_EXTRA_KEYS}
     v1_obj["arena_version"] = "1"
     assert sha256(canonical_bytes(v1_obj)).hexdigest() == V1_GOLDEN_DIGEST

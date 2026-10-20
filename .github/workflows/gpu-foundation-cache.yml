@@ -17,7 +17,7 @@ on:
       dataset:
         description: "Dataset"
         type: choice
-        options: [synthetic-dev, etth1, ecl, synthetic-shift1, synthetic-shift2, synthetic-shift3, synthetic-wide]
+        options: [synthetic-dev, etth1, ecl, synthetic-shift1, synthetic-shift2, synthetic-shift3, synthetic-wide, synthetic-shift2-holdout, synthetic-shift3-holdout]
         default: synthetic-dev
       gpus:
         description: "How many free GPUs to request"

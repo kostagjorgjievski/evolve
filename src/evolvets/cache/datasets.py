@@ -16,6 +16,7 @@ from pathlib import Path
 from evolvets.arena.realdata.prepare import load_public, read_split_manifest
 from evolvets.arena.synthetic import GENERATOR_VERSION
 from evolvets.arena.synthetic.grammar import FAMILIES
+from evolvets.arena.synthetic.holdout import HOLDOUT_INDEX_START
 from evolvets.arena.synthetic.presets import SCAN_DATASETS, SCAN_PRESETS, preset_sha256, scan_tasks
 from evolvets.arena.synthetic.seeds import dev_tasks
 from evolvets.cache.interfaces import SeriesInput
@@ -72,6 +73,11 @@ def public_inputs(
     if dataset in SCAN_DATASETS:
         preset = SCAN_PRESETS[dataset]
         count = _check_per_family(per_family)
+        if count > HOLDOUT_INDEX_START:
+            raise CacheError(
+                f"{dataset}: per_family must be <= {HOLDOUT_INDEX_START} for a scan dataset; "
+                f"scan indexes {HOLDOUT_INDEX_START} and up are the holdout range"
+            )
         series = tuple(
             SeriesInput(f"{family}/{i}", task.world.y, task.world.spec.period)
             for family in preset.families

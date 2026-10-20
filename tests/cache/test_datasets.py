@@ -23,6 +23,12 @@ from evolvets.arena.realdata.prepare import (
 )
 from evolvets.arena.synthetic import GENERATOR_VERSION
 from evolvets.arena.synthetic.grammar import FAMILIES
+from evolvets.arena.synthetic.holdout import (
+    HOLDOUT_DATASETS,
+    HOLDOUT_PRESETS,
+    holdout_series_id,
+    holdout_tasks,
+)
 from evolvets.arena.synthetic.presets import (
     SCAN_DATASETS,
     SCAN_PRESETS,
@@ -149,6 +155,45 @@ def test_scan_inputs_reject_a_missing_or_small_per_family(per_family: object) ->
         )
 
 
+def test_scan_inputs_reject_a_per_family_reaching_the_holdout_range() -> None:
+    """Scan indexes from 1000 are the holdout range, so a scan cache never draws them."""
+    with pytest.raises(CacheError, match="holdout range"):
+        public_inputs("synthetic-shift1", Path("data"), Path("data/manifests"), per_family=1001)
+
+
+@pytest.mark.parametrize("dataset", HOLDOUT_DATASETS)
+def test_holdout_inputs(dataset: str) -> None:
+    """Each holdout yields its base families' worlds at indexes from 1000, pinned by source."""
+    preset = HOLDOUT_PRESETS[dataset]
+    base = SCAN_PRESETS[preset.base]
+    source, series = public_inputs(dataset, Path("data"), Path("data/manifests"), per_family=2)
+    assert source == {
+        "kind": "synthetic",
+        "pool": "holdout",
+        "preset": preset.base,
+        "preset_sha256": preset_sha256(base),
+        "index_start": str(preset.index_start),
+        "generator_version": GENERATOR_VERSION,
+        "per_family": "2",
+    }
+    expected_ids = [holdout_series_id(family, i) for family in base.families for i in range(2)]
+    assert [entry.series_id for entry in series] == expected_ids  # the base's families order
+    by_id = {entry.series_id: entry for entry in series}
+    for family in base.families:
+        for i, task in enumerate(holdout_tasks(dataset, family, 2)):
+            entry = by_id[holdout_series_id(family, i)]
+            assert entry.values == task.world.y
+            assert entry.period == task.world.spec.period
+
+
+@pytest.mark.parametrize("per_family", [None, 0, True, 1001])
+def test_holdout_inputs_reject_a_missing_small_or_huge_per_family(per_family: object) -> None:
+    with pytest.raises(CacheError, match="per_family"):
+        public_inputs(  # type: ignore[arg-type]
+            "synthetic-shift2-holdout", Path("data"), Path("data/manifests"), per_family=per_family
+        )
+
+
 class _RaisesOnUse:
     """Passes World's length check but raises on any real access."""
 
@@ -195,6 +240,6 @@ def test_unknown_dataset_is_refused(tmp_path: Path) -> None:
     assert CACHE_DATASETS == ("etth1", "ecl", "synthetic-dev")
 
 
-def test_dev_datasets_are_the_cache_datasets_plus_the_scan_presets() -> None:
+def test_dev_datasets_are_the_cache_scan_and_holdout_datasets() -> None:
     """Every loadable dev dataset, in order; 'all' still expands to the cache ones only."""
-    assert (*CACHE_DATASETS, *SCAN_DATASETS) == DEV_DATASETS
+    assert (*CACHE_DATASETS, *SCAN_DATASETS, *HOLDOUT_DATASETS) == DEV_DATASETS

@@ -27,6 +27,7 @@ from evolvets.arena.errors import ArenaError
 from evolvets.arena.evaluate import replay_dataset, result_to_obj
 from evolvets.arena.oracles import oracle_dataset, oracle_to_obj
 from evolvets.arena.pool import POOL_SPECS
+from evolvets.arena.synthetic.holdout import HOLDOUT_DATASETS
 from evolvets.cache.datasets import DEV_DATASETS
 from evolvets.ledger.blobs import BlobStore
 from evolvets.ledger.payloads import Baseline
@@ -84,6 +85,11 @@ def _validate_spec(
     for dataset in spec.datasets:
         if dataset not in DEV_DATASETS:
             raise ValueError(f"unknown dataset {dataset!r}; expected one of {list(DEV_DATASETS)}")
+        if dataset in HOLDOUT_DATASETS:
+            raise ValueError(
+                f"{dataset} is a holdout dataset: holdouts score accepted edits only "
+                "and are never tuned on"
+            )
     if not spec.pool_specs:
         raise ValueError("pool_specs must name at least one pool spec")
     if len(set(spec.pool_specs)) != len(spec.pool_specs):

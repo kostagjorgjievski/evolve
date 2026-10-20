@@ -129,6 +129,44 @@ def test_build_then_verify_synthetic_shift1(
     assert capsys.readouterr().out.splitlines() == out
 
 
+# --- TASK_016 PR C: the holdout builds like any synthetic dataset (test 11) -----------------------
+
+
+def test_build_then_verify_synthetic_shift2_holdout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A holdout replicate builds and verifies: one OK line, five families, same again."""
+    cache_root = tmp_path / "cache_store"
+    assert (
+        cli.main(
+            [
+                "cache",
+                "build",
+                "synthetic-shift2-holdout",
+                "--cache-root",
+                str(cache_root),
+                "--per-family",
+                "1",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out.splitlines()
+    match = _OK_LINE.match(out[0])
+    assert match is not None, out[0]
+    assert match.group(1, 2, 3) == (
+        "synthetic-shift2-holdout",
+        "5",
+        str(5 * (2000 - _START)),
+    )  # the base's 5 families, indexes from 1000
+
+    assert (
+        cli.main(["cache", "verify", "synthetic-shift2-holdout", "--cache-root", str(cache_root)])
+        == 0
+    )
+    assert capsys.readouterr().out.splitlines() == out
+
+
 def test_unknown_dataset_is_rejected_by_argparse() -> None:
     for argv in (
         ["cache", "build", "nope"],

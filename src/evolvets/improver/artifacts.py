@@ -10,9 +10,11 @@ statement could not run there even if one were allowed.
 ``validate_artifact_source`` pins that grammar by AST walk: it is a style and
 protocol guard — it keeps an LLM proposal a *kind* of program (no imports, no
 f-strings, no ``while``/``try``, no comprehensions, only the pinned calls and
-``raise ValueError(<one argument>)``) — not a wall-clock or resource sandbox;
-the arena still validates every output an artifact returns, and (f) runs each
-evaluation under a timeout. Every rejection message names the construct.
+``raise ValueError(<one argument>)``, no rebinding of any pinned name, no
+keyword arguments, no method objects as values) — not a wall-clock or
+resource sandbox: a huge ``range(...)`` literal can still burn CPU or memory,
+so (f)'s evaluation timeout has to bound that too. The arena still validates
+every output an artifact returns. Every rejection message names the construct.
 
 The reference artifact is ``bias_share`` translated into the grammar
 operation for operation (``updater/forecast.py`` with ``updater/baselines.py``
@@ -28,6 +30,7 @@ never an arena, cache or data module (``.importlinter``).
 import ast
 import difflib
 import math
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from types import MappingProxyType
 from typing import cast
@@ -54,6 +57,17 @@ REFERENCE_ARTIFACT_CONFIG: Mapping[str, float] = MappingProxyType(
 
 #: The pure functions an artifact may call on the loader-provided ``math``.
 MATH_MEMBERS: frozenset[str] = frozenset({"exp", "sqrt", "log", "isfinite", "fabs"})
+
+#: The only methods the grammar ever calls — and then only as the function of
+#: a call with exactly one positional argument (the reference's
+#: ``applied.pop(step)`` and ``out.append(...)``), never as a value.
+_PINNED_METHODS: frozenset[str] = frozenset({"pop", "append"})
+
+#: Attribute loads rejected outright: ``str.format``/``str.format_map``
+#: resolve attribute and index chains from any object they are handed (into
+#: module globals, for example), so they are not allowed anywhere in an
+#: artifact — the call rule already rejects them as method calls.
+_REFLECTIVE_FORMATS: frozenset[str] = frozenset({"format", "format_map"})
 
 #: The sandbox's entire builtin set: 17 names, each mapped to the real builtin,
 #: so the names resolve both as calls and as plain references (``isinstance``
@@ -149,12 +163,22 @@ class _Validator:
     ``init`` and ``update`` — nothing else of any kind. Parameter annotations
     are allowed (and validated as expressions); variable annotation
     statements, return annotations, decorators and default values are not.
+
+    A name the call rule may resolve to — a sandbox builtin, ``math``, a
+    function the artifact defines — can never be rebound: not by an
+    assignment or loop target, not by a nested def's parameter or its own
+    name. That is what makes the pinned-call rule a boundary and not a style
+    preference: an artifact cannot store a method (``str.format`` above all)
+    under an allowed name and have a call resolve to it.
     """
 
     def __init__(self, tree: ast.Module) -> None:
-        self._names = frozenset(
-            node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
-        )
+        names = [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+        #: every function name in the module, however deeply nested
+        self._names = frozenset(names)
+        #: names no artifact may bind: the sandbox's entire vocabulary
+        self._reserved: frozenset[str] = frozenset(ARTIFACT_BUILTINS) | {"math"} | self._names
+        self._name_counts: Counter[str] = Counter(names)
 
     # --- module and functions ---------------------------------------------------------------------
 
@@ -177,11 +201,30 @@ class _Validator:
                 )
             if node.name != expected:
                 raise ArtifactError(f"a top-level def must be named {expected}, got {node.name!r}")
-            self._check_signature(node, _PINNED_PARAMETERS[expected])
-            self._check_statements(node.body)
+            self._check_function(node, _PINNED_PARAMETERS[expected], frozenset(_PINNED_PARAMETERS))
 
-    def _check_signature(self, node: ast.FunctionDef, pinned: tuple[str, ...]) -> None:
-        """Check the parameter list: plain names, no defaults, optional annotations."""
+    def _check_function(
+        self, node: ast.FunctionDef, pinned: tuple[str, ...], visible: frozenset[str]
+    ) -> None:
+        """Check one def's signature, then its body with its own nested helpers callable.
+
+        ``visible`` is what a bare call name may resolve to here: the two
+        top-level defs (the sandbox namespace holds both) plus every helper
+        defined within this function — a helper defined in ``update`` is not
+        callable from ``init`` (it would only NameError there at runtime).
+        """
+        helpers = frozenset(
+            child.name
+            for child in ast.walk(node)
+            if isinstance(child, ast.FunctionDef) and child is not node
+        )
+        self._check_signature(node, pinned, visible)
+        self._check_statements(node.body, visible | helpers)
+
+    def _check_signature(
+        self, node: ast.FunctionDef, pinned: tuple[str, ...], visible: frozenset[str]
+    ) -> None:
+        """Check the parameter list: plain fresh names, no defaults, optional annotations."""
         args = node.args
         parameters = [*args.posonlyargs, *args.args]
         if args.vararg is not None or args.kwarg is not None or args.kwonlyargs:
@@ -197,49 +240,63 @@ class _Validator:
             raise ArtifactError(
                 f"{node.name} must take exactly the parameters {list(pinned)}, got {list(names)}"
             )
+        for name in names:
+            if name in self._reserved:
+                raise ArtifactError(
+                    f"the parameter {name!r} of {node.name} shadows a pinned name; the "
+                    "sandbox's builtins, math and the artifact's own functions cannot be rebound"
+                )
         for parameter in parameters:
             if parameter.annotation is not None:
-                self._check_expression(parameter.annotation)
+                self._check_expression(parameter.annotation, visible)
 
-    def _check_nested_def(self, node: ast.FunctionDef) -> None:
-        """Check a nested helper: plain named parameters, its body under the same rules."""
+    def _check_nested_def(self, node: ast.FunctionDef, visible: frozenset[str]) -> None:
+        """Check a nested helper: a fresh name, plain parameters, the same body rules."""
+        if node.name in ARTIFACT_BUILTINS or node.name == "math":
+            raise ArtifactError(
+                f"a nested def must not be named {node.name!r}; the sandbox's pinned "
+                "names cannot be rebound"
+            )
+        if node.name in _PINNED_PARAMETERS or self._name_counts[node.name] != 1:
+            raise ArtifactError(
+                f"the nested def {node.name!r} shadows another function of the artifact"
+            )
         own = tuple(parameter.arg for parameter in [*node.args.posonlyargs, *node.args.args])
-        self._check_signature(node, own)
-        self._check_statements(node.body)
+        self._check_function(node, own, visible)
 
     # --- statements ---------------------------------------------------------------
 
-    def _check_statements(self, statements: Sequence[ast.stmt]) -> None:
+    def _check_statements(self, statements: Sequence[ast.stmt], visible: frozenset[str]) -> None:
         for statement in statements:
-            self._check_statement(statement)
+            self._check_statement(statement, visible)
 
-    def _check_statement(self, statement: ast.stmt) -> None:
+    def _check_statement(self, statement: ast.stmt, visible: frozenset[str]) -> None:
         if isinstance(statement, ast.FunctionDef):
-            self._check_nested_def(statement)
+            self._check_nested_def(statement, visible)
         elif isinstance(statement, ast.For):
-            self._check_target(statement.target)
-            self._check_expression(statement.iter)
-            self._check_statements(statement.body)
-            self._check_statements(statement.orelse)
+            self._check_target(statement.target, visible, "a for-loop target")
+            self._check_expression(statement.iter, visible)
+            self._check_statements(statement.body, visible)
+            self._check_statements(statement.orelse, visible)
         elif isinstance(statement, ast.If):
-            self._check_expression(statement.test)
-            self._check_statements(statement.body)
-            self._check_statements(statement.orelse)
+            self._check_expression(statement.test, visible)
+            self._check_statements(statement.body, visible)
+            self._check_statements(statement.orelse, visible)
         elif isinstance(statement, ast.Return):
             if statement.value is not None:
-                self._check_expression(statement.value)
+                self._check_expression(statement.value, visible)
         elif isinstance(statement, ast.Assign):
             for target in statement.targets:
-                self._check_target(target)
-            self._check_expression(statement.value)
+                self._check_target(target, visible, "an assignment")
+            self._check_expression(statement.value, visible)
         elif isinstance(statement, ast.AugAssign):
             if not isinstance(statement.op, _ALLOWED_BINOPS):
                 raise ArtifactError(
                     f"the augmented assignment operator {self._symbol(statement.op)} is not "
                     "allowed; only + - * / % //"
                 )
-            self._check_target(statement.target)
-            self._check_expression(statement.value)
+            self._check_target(statement.target, visible, "an augmented assignment")
+            self._check_expression(statement.value, visible)
         elif isinstance(statement, ast.Pass):
             pass
         elif isinstance(statement, ast.Expr):
@@ -247,18 +304,18 @@ class _Validator:
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
                 pass  # an inner docstring
             elif isinstance(value, ast.Call):
-                self._check_call(value)
+                self._check_call(value, visible)
             else:
                 raise ArtifactError(
                     "an expression statement must be a string constant or an allowed call, "
                     f"got {self._expression_name(value)}"
                 )
         elif isinstance(statement, ast.Raise):
-            self._check_raise(statement)
+            self._check_raise(statement, visible)
         else:
             raise ArtifactError(f"{self._statement_name(statement)} is not allowed in an artifact")
 
-    def _check_raise(self, statement: ast.Raise) -> None:
+    def _check_raise(self, statement: ast.Raise, visible: frozenset[str]) -> None:
         """Allow exactly ``raise ValueError(<one argument>)``; nothing else raises."""
         if statement.exc is None:
             raise ArtifactError("a bare raise is not allowed; only raise ValueError(<argument>)")
@@ -280,11 +337,11 @@ class _Validator:
             raise ArtifactError(f"only raise ValueError(<argument>) is allowed, got {raised}")
         if len(call.args) != 1 or call.keywords:
             raise ArtifactError("raise ValueError must be given exactly one argument")
-        self._check_expression(call.args[0])
+        self._check_expression(call.args[0], visible)
 
     # --- expressions --------------------------------------------------------------
 
-    def _check_expression(self, node: ast.expr) -> None:
+    def _check_expression(self, node: ast.expr, visible: frozenset[str]) -> None:
         if isinstance(node, ast.Constant):
             value = node.value
             if isinstance(value, (bool, str)):
@@ -300,52 +357,52 @@ class _Validator:
         if isinstance(node, ast.Name):
             return
         if isinstance(node, ast.Attribute):
-            self._check_attribute(node)
+            self._check_attribute(node, visible)
         elif isinstance(node, (ast.Tuple, ast.List)):
             for element in node.elts:
-                self._check_expression(element)
+                self._check_expression(element, visible)
         elif isinstance(node, ast.Dict):
             for key in node.keys:
                 if key is None:
                     raise ArtifactError("dict unpacking ({**...}) is not allowed")
-                self._check_expression(key)
+                self._check_expression(key, visible)
             for entry in node.values:
-                self._check_expression(entry)
+                self._check_expression(entry, visible)
         elif isinstance(node, ast.Subscript):
-            self._check_expression(node.value)
-            self._check_index(node.slice)
+            self._check_expression(node.value, visible)
+            self._check_index(node.slice, visible)
         elif isinstance(node, ast.Call):
-            self._check_call(node)
+            self._check_call(node, visible)
         elif isinstance(node, ast.BinOp):
             if not isinstance(node.op, _ALLOWED_BINOPS):
                 raise ArtifactError(
                     f"the operator {self._symbol(node.op)} is not allowed; only + - * / % //"
                 )
-            self._check_expression(node.left)
-            self._check_expression(node.right)
+            self._check_expression(node.left, visible)
+            self._check_expression(node.right, visible)
         elif isinstance(node, ast.UnaryOp):
             if not isinstance(node.op, (ast.USub, ast.UAdd, ast.Not)):
                 raise ArtifactError(
                     f"the unary operator {self._symbol(node.op)} is not allowed; only - + not"
                 )
-            self._check_expression(node.operand)
+            self._check_expression(node.operand, visible)
         elif isinstance(node, ast.Compare):
-            self._check_expression(node.left)
+            self._check_expression(node.left, visible)
             for comparator in node.comparators:
-                self._check_expression(comparator)
+                self._check_expression(comparator, visible)
         elif isinstance(node, ast.BoolOp):
             for operand in node.values:
-                self._check_expression(operand)
+                self._check_expression(operand, visible)
         elif isinstance(node, ast.IfExp):
-            self._check_expression(node.test)
-            self._check_expression(node.body)
-            self._check_expression(node.orelse)
+            self._check_expression(node.test, visible)
+            self._check_expression(node.body, visible)
+            self._check_expression(node.orelse, visible)
         else:
             raise ArtifactError(f"{self._expression_name(node)} is not allowed in an artifact")
 
-    def _check_attribute(self, node: ast.Attribute) -> None:
-        """Allow any non-dunder attribute; on ``math`` only MATH_MEMBERS."""
-        self._check_expression(node.value)
+    def _check_attribute(self, node: ast.Attribute, visible: frozenset[str]) -> None:
+        """Allow any non-dunder attribute; on ``math`` only MATH_MEMBERS; methods are not values."""
+        self._check_expression(node.value, visible)
         if node.attr.startswith("__") and node.attr.endswith("__"):
             raise ArtifactError(f"the dunder attribute .{node.attr} is not allowed")
         if (
@@ -354,25 +411,36 @@ class _Validator:
             and node.attr not in MATH_MEMBERS
         ):
             raise ArtifactError(f"math.{node.attr} is not allowed; only {sorted(MATH_MEMBERS)}")
+        if node.attr in _REFLECTIVE_FORMATS:
+            raise ArtifactError(
+                f".{node.attr} is not allowed anywhere in an artifact: a format string "
+                "walks attribute and index chains from any object (into module globals, "
+                "for example), which no artifact may do"
+            )
+        if node.attr in _PINNED_METHODS:
+            raise ArtifactError(
+                f".{node.attr} is a method call, not a value; it may appear only as the "
+                "function of a call"
+            )
 
-    def _check_call(self, node: ast.Call) -> None:
-        """Allow pinned builtins, artifact-defined functions, math members and .pop/.append."""
+    def _check_call(self, node: ast.Call, visible: frozenset[str]) -> None:
+        """Allow pinned builtins, visible artifact functions, math members and .pop/.append."""
         function = node.func
         if isinstance(function, ast.Name):
-            if function.id not in ARTIFACT_BUILTINS and function.id not in self._names:
+            if function.id not in ARTIFACT_BUILTINS and function.id not in visible:
                 raise ArtifactError(
                     f"the call to {function.id!r} is not allowed; only the pinned builtins "
-                    f"({sorted(ARTIFACT_BUILTINS)}) and the artifact's own functions"
+                    f"({sorted(ARTIFACT_BUILTINS)}) and the artifact's own functions in scope"
                 )
         elif isinstance(function, ast.Attribute):
-            self._check_expression(function.value)
+            self._check_expression(function.value, visible)
             if isinstance(function.value, ast.Name) and function.value.id == "math":
                 if function.attr not in MATH_MEMBERS:
                     raise ArtifactError(
                         f"math.{function.attr} is not allowed; only {sorted(MATH_MEMBERS)}"
                     )
-            elif function.attr in ("pop", "append"):
-                if len(node.args) != 1 or node.keywords:
+            elif function.attr in _PINNED_METHODS:
+                if len(node.args) != 1:
                     raise ArtifactError(
                         f".{function.attr} must be called with exactly one argument"
                     )
@@ -382,32 +450,43 @@ class _Validator:
                 )
         else:
             raise ArtifactError("a call through an expression is not allowed")
+        if node.keywords:
+            raise ArtifactError(
+                "keyword arguments in a call are not allowed (the call rule grants none; "
+                "a keyword slot is the one channel a method could be handed to a builtin "
+                "as a value)"
+            )
         for argument in node.args:
-            self._check_expression(argument)
-        for keyword in node.keywords:
-            if keyword.arg is None:
-                raise ArtifactError("**kwargs in a call is not allowed")
-            self._check_expression(keyword.value)
+            self._check_expression(argument, visible)
 
-    def _check_index(self, node: ast.expr) -> None:
+    def _check_index(self, node: ast.expr, visible: frozenset[str]) -> None:
         """Allow any expression as an index, and slices whose parts are expressions."""
         if isinstance(node, ast.Slice):
             for part in (node.lower, node.upper, node.step):
                 if part is not None:
-                    self._check_expression(part)
+                    self._check_expression(part, visible)
         else:
-            self._check_expression(node)
+            self._check_expression(node, visible)
 
-    def _check_target(self, node: ast.expr) -> None:
-        """Allow names, subscript stores and tuple/list unpacking as assignment targets."""
+    def _check_target(self, node: ast.expr, visible: frozenset[str], what: str) -> None:
+        """Allow names, subscript stores and tuple/list unpacking as assignment targets.
+
+        A name target must be fresh: the sandbox's pinned names — the 17
+        builtins, ``math``, the artifact's own functions — are never rebindable.
+        """
         if isinstance(node, ast.Name):
+            if node.id in self._reserved:
+                raise ArtifactError(
+                    f"{what} must not bind the pinned name {node.id!r}; the sandbox's "
+                    "builtins, math and the artifact's own functions cannot be rebound"
+                )
             return
         if isinstance(node, (ast.Tuple, ast.List)):
             for element in node.elts:
-                self._check_target(element)
+                self._check_target(element, visible, what)
             return
         if isinstance(node, ast.Subscript):
-            self._check_expression(node)
+            self._check_expression(node, visible)
             return
         if isinstance(node, ast.Starred):
             raise ArtifactError("a starred assignment target is not allowed")
@@ -460,10 +539,16 @@ def validate_artifact_source(source: str) -> None:
     docstrings, allowed calls as statements and ``raise ValueError(<one
     argument>)``; and, within expressions, only finite str/bool/int/float
     constants, names, non-dunder attributes (``math`` restricted to
-    :data:`MATH_MEMBERS`), tuples, lists, dicts, subscripts, slices, calls
-    (the pinned builtins, artifact-defined functions, ``math`` members and
-    one-argument ``.pop``/``.append``), the operators ``+ - * / % //``, unary
-    ``- + not``, comparisons, ``and``/``or`` and conditional expressions.
+    :data:`MATH_MEMBERS`; ``.format``/``.format_map`` nowhere; ``.pop``/
+    ``.append`` only as the called method, never as a value), tuples, lists,
+    dicts, subscripts, slices, calls (the pinned builtins, artifact-defined
+    functions in scope, ``math`` members and one-argument ``.pop``/
+    ``.append`` — and no keyword arguments in any call), the operators
+    ``+ - * / % //``, unary ``- + not``, comparisons, ``and``/``or`` and
+    conditional expressions. No name the call rule may resolve to — a pinned
+    builtin, ``math``, a function the artifact defines — is ever rebound: not
+    by an assignment or loop target, not by a nested def's parameter or its
+    own name.
     """
     try:
         tree = ast.parse(source)
@@ -524,8 +609,12 @@ def artifact_updater(source: str) -> Callable[[], ForecastUpdater]:
     are exactly ``{"__builtins__": dict(ARTIFACT_BUILTINS), "math": math}``:
     no ``__import__``, no ``open``, no ``eval``. No import statement is
     allowed, so none ever needs ``__import__``; ``math`` arrives as a global.
-    The functions are stateless — state travels through the state object — so
-    the one namespace serves every series, one adapter per replay.
+    And the grammar leaves no call to divert: no pinned name can be rebound,
+    keyword arguments are not granted, and the only methods ever called are
+    one-argument ``.pop``/``.append`` — so no artifact code can invoke a
+    method (``str.format`` above all) on anything. The functions are
+    stateless — state travels through the state object — so the one
+    namespace serves every series, one adapter per replay.
 
     ``update`` returns whatever the artifact returns as ``(output, state)``
     and dispatches on shape: when the first element of ``output`` is itself a

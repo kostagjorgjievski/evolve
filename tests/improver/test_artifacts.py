@@ -4,7 +4,10 @@ The artifact grammar is pinned by rejection cases that each name their
 construct, one accept-and-run case that exercises every allowed construct, a
 sandbox check that the loader's namespace is exactly the pinned builtins and
 ``math``, and the reference artifact: bias_share translated into the grammar,
-which must replay bit-equal to the class original. The unit drives use
+which must replay bit-equal to the class original. The rejection cases
+include the two escape routes closed after the PR A1 review — rebinding a
+pinned name to smuggle a method under an allowed call name, and handing a
+method to a builtin through a keyword argument. The unit drives use
 ``tests/updater/test_forecast.py``'s helpers; the replay test builds the same
 synthetic-dev fixture pool as ``tests/updater/test_baselines_replay.py``.
 """
@@ -350,6 +353,121 @@ def _rejects() -> list[tuple[str, str, str]]:
             _artifact(update_body='    value = (state["f"])(1)\n    return ({}, state)\n'),
             "expression",
         ),
+        # --- the rebind and method-as-value routes (PR A1 review) ------------------
+        # A name the call rule resolves to is never rebindable, by any binding form.
+        (
+            "format-string-bind",
+            _artifact(
+                update_body='    len = "{0.__init__.__globals__[sys].modules}".format\n'
+                "    return ({}, state)\n"
+            ),
+            "an assignment must not bind the pinned name 'len'",
+        ),
+        (
+            "rebind-builtin-assign",
+            _artifact(
+                update_body="    sorted = config.clear\n    sorted()\n    return ({}, state)\n"
+            ),
+            "an assignment must not bind the pinned name 'sorted'",
+        ),
+        (
+            "rebind-builtin-for-target",
+            _artifact(
+                update_body="    for len in [config.clear]:\n        pass\n    return ({}, state)\n"
+            ),
+            "a for-loop target must not bind the pinned name 'len'",
+        ),
+        (
+            "rebind-builtin-tuple-target",
+            _artifact(
+                update_body="    (abs, x) = (config.clear, 1)\n    abs()\n    return ({}, state)\n"
+            ),
+            "an assignment must not bind the pinned name 'abs'",
+        ),
+        (
+            "rebind-builtin-augassign",
+            _artifact(update_body="    len += 1\n    return ({}, state)\n"),
+            "an augmented assignment must not bind the pinned name 'len'",
+        ),
+        (
+            "rebind-own-function",
+            _artifact(
+                update_body="    def helper():\n        pass\n"
+                "    helper = config.clear\n    helper()\n    return ({}, state)\n"
+            ),
+            "an assignment must not bind the pinned name 'helper'",
+        ),
+        (
+            "rebind-math",
+            _artifact(
+                update_body="    math = config\n    value = math.exp(0.5)\n    return ({}, state)\n"
+            ),
+            "an assignment must not bind the pinned name 'math'",
+        ),
+        (
+            "nested-param-shadows",
+            _artifact(
+                update_body="    def helper(sorted):\n        pass\n"
+                "    helper(config.clear)\n    return ({}, state)\n"
+            ),
+            "the parameter 'sorted' of helper shadows a pinned name",
+        ),
+        (
+            "nested-def-named-builtin",
+            _artifact(update_body="    def len(x):\n        return x\n    return ({}, state)\n"),
+            "a nested def must not be named 'len'",
+        ),
+        (
+            "nested-def-shadows-init",
+            _artifact(update_body="    def init(x):\n        return x\n    return ({}, state)\n"),
+            "the nested def 'init' shadows another function of the artifact",
+        ),
+        (
+            "duplicate-nested-def",
+            _artifact(
+                update_body="    def step(x):\n        pass\n\n"
+                "    def step(y):\n        pass\n    return ({}, state)\n"
+            ),
+            "the nested def 'step' shadows another function of the artifact",
+        ),
+        (
+            "cross-function-helper-call",
+            _artifact(
+                init_body="    helper(1)\n    return {}\n",
+                update_body="    def helper(x):\n        pass\n    return ({}, state)\n",
+            ),
+            "the call to 'helper' is not allowed",
+        ),
+        # Methods are not values, and reflection has no route in at all.
+        (
+            "format-attribute-load",
+            _artifact(update_body='    value = "{0.x}".format\n    return ({}, state)\n'),
+            ".format is not allowed anywhere",
+        ),
+        (
+            "format-map-attribute-load",
+            _artifact(update_body='    value = "{0.x}".format_map\n    return ({}, state)\n'),
+            ".format_map is not allowed anywhere",
+        ),
+        (
+            "pop-as-value",
+            _artifact(update_body="    xs = [1.0]\n    value = xs.pop\n    return ({}, state)\n"),
+            ".pop is a method call, not a value",
+        ),
+        (
+            "append-as-value",
+            _artifact(
+                update_body="    xs = [1.0]\n    value = xs.append\n    return ({}, state)\n"
+            ),
+            ".append is a method call, not a value",
+        ),
+        (
+            "keyword-argument",
+            _artifact(
+                update_body="    value = sorted([1], key=config.get)\n    return ({}, state)\n"
+            ),
+            "keyword arguments in a call are not allowed",
+        ),
     ]
 
 
@@ -370,6 +488,57 @@ def test_validator_rejects(label: str, source: str, needle: str) -> None:
     """Every construct outside the grammar is rejected, its name in the message."""
     with pytest.raises(ArtifactError, match=re.escape(needle)):
         validate_artifact_source(source)
+
+
+#: The PR A1 review payload: ``str.format`` bound to a pinned name, used to
+#: walk ``__init__.__globals__`` chains from ``context`` into ``sys.modules``.
+#: It is ordinary Python and runs happily in an unrestricted namespace — a
+#: read path from artifact code into modules it must never see — so the
+#: grammar has to refuse it before any of that matters.
+FORMAT_SYS_MODULES_PAYLOAD = """def init(n_experts, horizon, config, seed):
+    return {"h": horizon}
+
+
+def update(state, feedback, context):
+    len = "{0.__init__.__globals__[dataclass].__globals__[sys].modules}".format
+    t = len(context)
+    max = t.find
+    state["mods"] = t[max("evolvets.arena"):]
+    return ([0.0] * state["h"], state)
+"""
+
+
+def test_format_sys_modules_payload_is_rejected_before_exec() -> None:
+    """The format/sys.modules payload is refused at validation, before compile or exec.
+
+    The payload executes cleanly if it is ever run, so the only way this can
+    raise the validator's own error is that validation ran first: the walk
+    names the first pinned-name binding, and the loader refuses the source
+    without ever compiling it.
+    """
+    with pytest.raises(ArtifactError, match=re.escape("pinned name 'len'")):
+        validate_artifact_source(FORMAT_SYS_MODULES_PAYLOAD)
+    with pytest.raises(ArtifactError, match=re.escape("pinned name 'len'")):
+        artifact_updater(FORMAT_SYS_MODULES_PAYLOAD)
+
+
+def test_helper_scope_is_per_function() -> None:
+    """Helpers are callable anywhere in the function that defines them; the two top-level
+    defs stay callable from each other; a helper of one is not callable from the other."""
+    siblings = _artifact(
+        update_body=(
+            "    def first(x):\n"
+            "        return second(x)\n"
+            "\n"
+            "    def second(y):\n"
+            "        return y\n"
+            "    value = first(1)\n"
+            "    return ({}, state)\n"
+        )
+    )
+    validate_artifact_source(siblings)
+    top_level = _artifact(update_body="    state = init(1, 1, {}, 0)\n    return ({}, state)\n")
+    validate_artifact_source(top_level)  # init and update live in the one sandbox namespace
 
 
 #: One artifact exercising every allowed construct: the pinned builtins, math's

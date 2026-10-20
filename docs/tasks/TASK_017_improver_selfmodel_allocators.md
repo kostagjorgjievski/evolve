@@ -335,7 +335,7 @@ DEFAULT_PRIOR: Mapping[str, float] = MappingProxyType(
 @dataclass(frozen=True)
 class HistoryPoint:
     features: ProposalFeatures  # evolvets.improver.interfaces
-    gain: float                 # realised dev MASE gain of that proposal
+    gain: float  # realised dev MASE gain of that proposal
 
 
 class SelfModel(Protocol):
@@ -452,7 +452,13 @@ class Allocator(Protocol):
 
 ```python
 ALLOCATOR_IDS: tuple[str, ...] = (
-    "evaluate_all", "fixed", "random", "predictive", "shuffled", "bandit_ucb", "bo_gp",
+    "evaluate_all",
+    "fixed",
+    "random",
+    "predictive",
+    "shuffled",
+    "bandit_ucb",
+    "bo_gp",
 )
 FAMILY_ORDER: tuple[str, ...] = ("params", "logic")
 ARM_UNSEEN_SCORE = 1e9
@@ -461,14 +467,14 @@ ARM_UNSEEN_SCORE = 1e9
 def make_allocator(
     allocator_id: str,
     *,
-    k: int = 1,                      # per-generation evaluation slots, >= 1
-    quantile: str = "q50",           # the predictive allocators' score key
-    bandit_c: float = 1.0,           # UCB exploration rate, > 0
-    gp_gamma: float = 1.0,           # RBF scale, > 0
-    gp_noise: float = 0.01,          # observation noise variance, > 0
-    gp_beta: float = 2.0,            # GP-UCB exploration weight, > 0
-    gp_prior_std: float = 1.0,       # prior std with no history, > 0
-    history_cap: int = 100,          # rivals fit at most this many latest points, >= 1
+    k: int = 1,  # per-generation evaluation slots, >= 1
+    quantile: str = "q50",  # the predictive allocators' score key
+    bandit_c: float = 1.0,  # UCB exploration rate, > 0
+    gp_gamma: float = 1.0,  # RBF scale, > 0
+    gp_noise: float = 0.01,  # observation noise variance, > 0
+    gp_beta: float = 2.0,  # GP-UCB exploration weight, > 0
+    gp_prior_std: float = 1.0,  # prior std with no history, > 0
+    history_cap: int = 100,  # rivals fit at most this many latest points, >= 1
 ) -> Allocator: ...
 
 

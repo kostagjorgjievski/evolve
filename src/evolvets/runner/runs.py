@@ -173,6 +173,11 @@ class Run:
         """The field-wise sum of the budgets of every record this Run appended."""
         return Budget(**self._spent)
 
+    @property
+    def blobs(self) -> BlobStore:
+        """The run's blob store, for readers that must resolve blob references (the improver)."""
+        return self._blobs
+
     def put_blob(self, obj: object) -> str:
         """Store ``obj`` as canonical bytes in the run's blob store."""
         return self._blobs.put(canonical_bytes(obj))

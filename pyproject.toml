@@ -86,6 +86,11 @@ module = [
     # (the object space); PR A2 adds the client, prompt and proposers.
     "evolvets.improver.interfaces",
     "evolvets.improver.artifacts",
+    # TASK_017 PR A2: the LLM client, the observation object, the prompt and the proposers.
+    "evolvets.improver.client",
+    "evolvets.improver.observations",
+    "evolvets.improver.prompt",
+    "evolvets.improver.propose",
     # TASK_011: every new runner module joins the strict list (PR A: runs;
     # PR B: gate1_grids, gate1_tune; PR C1: gate1_report_data; PR C2: gate1_report).
     # TASK_012 PR A: gate1_sealed (split: plan first, run next).

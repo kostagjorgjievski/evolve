@@ -28,6 +28,7 @@ from typing import cast
 
 from evolvets.arena.dev import DevPool
 from evolvets.arena.pool import POOL_SPECS
+from evolvets.arena.synthetic.holdout import HOLDOUT_DATASETS
 from evolvets.arena.versions import protocol_versions
 from evolvets.cache.datasets import DEV_DATASETS
 from evolvets.ledger.blobs import BlobStore
@@ -116,6 +117,11 @@ def _validate_spec(
     for dataset in spec.datasets:
         if dataset not in DEV_DATASETS:
             raise ValueError(f"unknown dataset {dataset!r}; expected one of {list(DEV_DATASETS)}")
+        if dataset in HOLDOUT_DATASETS:
+            raise ValueError(
+                f"{dataset} is a holdout dataset: holdouts score accepted edits only "
+                "and are never tuned on"
+            )
     if not spec.pool_specs:
         raise ValueError("pool_specs must name at least one pool spec")
     if len(set(spec.pool_specs)) != len(spec.pool_specs):

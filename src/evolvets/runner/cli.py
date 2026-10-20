@@ -33,6 +33,7 @@ from evolvets.arena.sealed.pools import (
     init_salt,
     synthetic_manifest_path,
 )
+from evolvets.arena.synthetic.holdout import HOLDOUT_DATASETS
 from evolvets.cache.datasets import CACHE_DATASETS, DEV_DATASETS, public_inputs
 from evolvets.cache.store import (
     DEFAULT_HORIZON,
@@ -73,6 +74,9 @@ from evolvets.updater.forecast import (
 from evolvets.updater.interfaces import ConfigValue
 
 _DATASET_ORDER = ("etth1", "ecl")
+#: ``gate1 tune/probe --dataset`` choices: every dev dataset but the holdouts
+#: (holdouts score accepted edits only and are never tuned on, TASK_016 PR C).
+_TUNABLE_DATASETS = tuple(name for name in DEV_DATASETS if name not in HOLDOUT_DATASETS)
 #: ``--model`` choices: the test/CI fake, then the registry's model order.
 _FOUNDATION_MODELS = ("fake", *MODELS)
 #: Where ``evolvets foundation build`` installs its caches; ``arena replay``
@@ -371,7 +375,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gate1_tune_cmd.add_argument(
         "--dataset",
-        choices=[*DEV_DATASETS, "all"],
+        choices=[*_TUNABLE_DATASETS, "all"],
         action="append",
         required=True,
         help="which dev datasets to tune; repeatable, 'all' expands to etth1, ecl and "
@@ -423,7 +427,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gate1_probe_cmd.add_argument(
         "--dataset",
-        choices=[*DEV_DATASETS, "all"],
+        choices=[*_TUNABLE_DATASETS, "all"],
         action="append",
         required=True,
         help="which dev datasets to probe; repeatable, 'all' expands to etth1, ecl and "

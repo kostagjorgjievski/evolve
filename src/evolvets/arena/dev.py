@@ -21,7 +21,14 @@ from evolvets.arena.pool import FoundationCache, check_pool_spec, load_foundatio
 from evolvets.arena.realdata.prepare import PrepareError, load_public
 from evolvets.arena.synthetic import GENERATOR_VERSION
 from evolvets.arena.synthetic.grammar import FAMILIES, GrammarConfig, SyntheticTask
-from evolvets.arena.synthetic.holdout import HOLDOUT_INDEX_START
+from evolvets.arena.synthetic.holdout import (
+    HOLDOUT_DATASETS,
+    HOLDOUT_INDEX_START,
+    HOLDOUT_INDEX_STOP,
+    HOLDOUT_PRESETS,
+    holdout_series_id,
+    holdout_tasks,
+)
 from evolvets.arena.synthetic.oracle import true_best_forecast
 from evolvets.arena.synthetic.presets import SCAN_DATASETS, SCAN_PRESETS, preset_sha256, scan_tasks
 from evolvets.arena.synthetic.seeds import dev_tasks
@@ -105,6 +112,8 @@ def load_dev_pool(
         series = _synthetic_series(manifest)
     elif dataset in SCAN_DATASETS:
         series = _scan_series(manifest)
+    elif dataset in HOLDOUT_DATASETS:
+        series = _holdout_series(manifest)
     else:  # unreachable: every DEV_DATASETS entry is dispatched above
         raise ArenaError(f"unknown dataset {dataset!r}; expected one of {list(DEV_DATASETS)}")
     return DevPool(
@@ -240,6 +249,58 @@ def _scan_series(manifest: CacheManifest) -> tuple[DevSeries, ...]:
     if len(expected) != len(manifest.series):
         raise ArenaError(
             f"{manifest.dataset}: {per_family} series over each of {len(preset.families)} "
+            f"families is {len(expected)} series, but the cache holds {len(manifest.series)}"
+        )
+    return checked_synthetic_series(manifest, expected)
+
+
+def _holdout_series(manifest: CacheManifest) -> tuple[DevSeries, ...]:
+    """Build one holdout replicate's series: worlds, change points and the oracle.
+
+    The cache must have been built from the very base preset, index range and
+    generator this module pins today (TASK_016 PR C), so a preset edited after
+    the cache was built, or a cache drawn from the wrong index range, is
+    refused, not reinterpreted. Holdout pools score accepted edits only and
+    are never tuned on; that later rule is enforced by the Phase 1 runner.
+    """
+    source = manifest.source
+    preset = HOLDOUT_PRESETS[manifest.dataset]
+    base = SCAN_PRESETS[preset.base]
+    if source.get("pool") != "holdout":
+        raise ArenaError(
+            f"{manifest.dataset}: source.pool must be 'holdout' for a holdout dataset, got "
+            f"{source.get('pool')!r}"
+        )
+    if source.get("preset") != preset.base:
+        raise ArenaError(
+            f"{manifest.dataset}: source.preset names {source.get('preset')!r}, not this "
+            f"holdout's base preset {preset.base!r}"
+        )
+    if source.get("preset_sha256") != preset_sha256(base):
+        raise ArenaError(
+            f"{manifest.dataset}: cache preset_sha256 {source.get('preset_sha256')!r} != "
+            f"current {preset_sha256(base)!r}; a preset edited after the cache was built "
+            "is refused, not reinterpreted"
+        )
+    if source.get("index_start") != str(HOLDOUT_INDEX_START):
+        raise ArenaError(
+            f"{manifest.dataset}: source.index_start must be {HOLDOUT_INDEX_START}, got "
+            f"{source.get('index_start')!r}; the holdout range is fixed"
+        )
+    _check_generator_version(manifest.dataset, source)
+    per_family = _source_per_family(manifest.dataset, source)
+    if per_family > HOLDOUT_INDEX_STOP - HOLDOUT_INDEX_START:
+        raise ArenaError(
+            f"{manifest.dataset}: source.per_family {per_family} exceeds the holdout index "
+            f"range [{HOLDOUT_INDEX_START}, {HOLDOUT_INDEX_STOP})"
+        )
+    expected: list[tuple[str, SyntheticTask]] = []
+    for family in base.families:
+        for index, task in enumerate(holdout_tasks(manifest.dataset, family, per_family)):
+            expected.append((holdout_series_id(family, index), task))
+    if len(expected) != len(manifest.series):
+        raise ArenaError(
+            f"{manifest.dataset}: {per_family} series over each of {len(base.families)} "
             f"families is {len(expected)} series, but the cache holds {len(manifest.series)}"
         )
     return checked_synthetic_series(manifest, expected)

@@ -1,7 +1,8 @@
 """Dev-pool tests: boundaries, oracle, isolation from sealed/raw, mismatches (tests 1-3).
 
 The scan pools of TASK_015 PR A follow (tests 9 to 11): one preset loaded,
-its refusals and its foundation join.
+its refusals and its foundation join. The holdout pools of TASK_016 PR C
+close the file (tests 7 to 9 of that PR).
 """
 
 from __future__ import annotations
@@ -22,6 +23,12 @@ from evolvets.arena.realdata import sources
 from evolvets.arena.realdata.fetch import fetch, raw_path
 from evolvets.arena.realdata.prepare import prepare, splits_manifest_path
 from evolvets.arena.synthetic.grammar import FAMILIES
+from evolvets.arena.synthetic.holdout import (
+    HOLDOUT_DATASETS,
+    HOLDOUT_PRESETS,
+    holdout_series_id,
+    holdout_tasks,
+)
 from evolvets.arena.synthetic.oracle import true_best_forecast
 from evolvets.arena.synthetic.presets import SCAN_DATASETS, SCAN_PRESETS, scan_tasks
 from evolvets.arena.synthetic.seeds import dev_tasks
@@ -31,6 +38,7 @@ from evolvets.cache.store import build_cache, cache_dir
 from evolvets.foundation.fake import FAKE_SPEC, FakeAdapter
 from evolvets.foundation.store import build_foundation_cache
 from evolvets.updater.baselines import BASELINES, DEFAULT_CONFIGS
+from evolvets.updater.forecast import FORECAST_DEFAULT_CONFIGS, bias_share
 from tests.arena.test_realdata_prepare import (
     _build_etth1_fixture,
     _install,
@@ -331,3 +339,113 @@ def test_scan_foundation_pool_joins_without_leakage(tmp_path: Path) -> None:
     )
     assert [cache.model for cache in pool.foundation] == ["fake"]
     assert pool_leakage_risk(pool.dataset, pool.foundation) is False
+
+
+# --- The holdout pools (TASK_016 PR C: tests 7 to 9) ----------------------------------------------
+
+
+def build_holdout_cache(
+    tmp_path: Path, dataset: str = "synthetic-shift2-holdout", per_family: int = 1
+) -> Path:
+    """A holdout cache under ``tmp_path``, one series per base family by default."""
+    cache_root = tmp_path / "cache_store"
+    source, series = public_inputs(dataset, tmp_path, tmp_path, per_family=per_family)
+    build_cache(dataset, source, series, cache_root)
+    return cache_root
+
+
+def _edit_holdout_source(cache_root: Path, dataset: str, **changes: str) -> None:
+    """Rewrite a holdout cache manifest's source entries the hand-made way."""
+    manifest_file = cache_dir(cache_root, dataset) / "manifest.json"
+    obj = json.loads(manifest_file.read_text(encoding="utf-8"))
+    obj["source"].update(changes)
+    manifest_file.write_text(json.dumps(obj), encoding="utf-8")
+
+
+@pytest.mark.parametrize("dataset", HOLDOUT_DATASETS)
+def test_holdout_pool(dataset: str, tmp_path: Path) -> None:
+    """One series per base family at index 1000, warmup boundaries, oracle, ok replay."""
+    cache_root = build_holdout_cache(tmp_path, dataset)
+    pool = load_dev_pool(dataset, cache_root, Path("data"), Path("data/manifests"))
+    base = SCAN_PRESETS[HOLDOUT_PRESETS[dataset].base]
+    assert [s.series_id for s in pool.series] == [
+        holdout_series_id(family, 0) for family in base.families
+    ]
+    worlds = {
+        holdout_series_id(family, 0): holdout_tasks(dataset, family, 1)[0].world
+        for family in base.families
+    }
+    for entry in pool.series:
+        world = worlds[entry.series_id]
+        assert entry.period == world.spec.period
+        assert entry.scale_end == 300
+        assert entry.score_start == 300  # GrammarConfig().warmup, which the base keeps
+        assert entry.score_end == 2000 - H
+        assert entry.change_points == world.change_points
+        assert entry.values == world.y[: 2000 - H + H]
+        assert entry.oracle is not None
+        assert len(entry.oracle) == 2000 - H - 300
+        for offset, forecast in enumerate(entry.oracle):
+            assert forecast == true_best_forecast(world, 300 + offset, H)
+    replay = replay_dataset(BASELINES["fixed_share"], DEFAULT_CONFIGS["fixed_share"], 0, pool)
+    assert replay.status == "ok"
+    assert len(replay.series) == len(base.families)
+    assert all(score.oracle_mase is not None for score in replay.series)
+
+
+@pytest.mark.parametrize(
+    "changes,match",
+    [
+        ({"pool": "scan"}, r"source\.pool"),
+        ({"preset": "synthetic-shift3"}, r"source\.preset"),
+        ({"preset_sha256": "0" * 64}, "preset_sha256"),
+        ({"index_start": "0"}, "index_start"),
+        ({"generator_version": "999"}, "generator_version"),
+        ({"per_family": "2"}, "but the cache holds"),
+    ],
+)
+def test_holdout_pool_refuses_an_edited_source(
+    tmp_path: Path, changes: dict[str, str], match: str
+) -> None:
+    """Each hand-made manifest edit is refused, as the scan refusals are (test 8)."""
+    cache_root = build_holdout_cache(tmp_path)  # five series: one per shift family
+    _edit_holdout_source(cache_root, "synthetic-shift2-holdout", **changes)
+    with pytest.raises(ArenaError, match=match):
+        load_dev_pool("synthetic-shift2-holdout", cache_root, Path("data"), Path("data/manifests"))
+
+
+def test_holdout_foundation_pool_joins_and_replays_forecast_v2(tmp_path: Path) -> None:
+    """A fake foundation cache over a holdout joins without leakage; bias_share replays ok."""
+    cache_root = build_holdout_cache(tmp_path, "synthetic-shift3-holdout")
+    foundation_root = tmp_path / "foundation_cache"
+    build_foundation_cache(
+        "synthetic-shift3-holdout",
+        FakeAdapter(FAKE_SPEC.name),
+        FAKE_SPEC,
+        foundation_root,
+        cache_root,
+        tmp_path,
+        tmp_path,
+        64,
+        per_family=1,
+    )
+    pool = load_dev_pool(
+        "synthetic-shift3-holdout",
+        cache_root,
+        tmp_path,
+        tmp_path,
+        pool_spec="simple+foundation",
+        foundation_root=foundation_root,
+        foundation_models=["fake"],
+    )
+    assert [cache.model for cache in pool.foundation] == ["fake"]
+    assert pool_leakage_risk(pool.dataset, pool.foundation) is False
+    replay = replay_dataset(
+        bias_share,
+        FORECAST_DEFAULT_CONFIGS["bias_share"],
+        0,
+        pool,
+        interface="forecast-v2",
+    )
+    assert replay.status == "ok"
+    assert replay.updater_interface == "forecast-v2"

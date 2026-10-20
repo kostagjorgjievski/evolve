@@ -118,19 +118,22 @@ open A2 only after A1 merges, exactly as TASK_015 split its PR A.
   fresh subprocess under a wall deadline and an address-space cap.
 
   ```python
-  WORKER_PROTOCOL = "1"           # stamped on every worker reply
-  MAX_REPLY_BYTES = 64 << 20      # a reply larger than this is a failure
+  WORKER_PROTOCOL = "1"  # stamped on every worker reply
+  MAX_REPLY_BYTES = 64 << 20  # a reply larger than this is a failure
+
 
   @dataclass(frozen=True)
   class EvalOutcome:
-      status: str        # "ok" | "failed" | "invalid_weights" | "timeout"
+      status: str  # "ok" | "failed" | "invalid_weights" | "timeout"
       result_obj: dict[str, object] | None  # result_to_obj(...) when ok
       series_wall_seconds: tuple[float, ...]
       error: str | None
-      wall_seconds: float          # parent-measured, whole request
+      wall_seconds: float  # parent-measured, whole request
 
-  def evaluate_source(request: Mapping[str, object], *, timeout_seconds: float,
-                      memory_gib: float) -> EvalOutcome: ...
+
+  def evaluate_source(
+      request: Mapping[str, object], *, timeout_seconds: float, memory_gib: float
+  ) -> EvalOutcome: ...
   ```
 
   `request` is the JSON object sent to the child on stdin:
@@ -147,7 +150,11 @@ open A2 only after A1 merges, exactly as TASK_015 split its PR A.
   "series_wall_seconds": [...], "error": ...}`. The parent spawns the child
   with `start_new_session=True` and
   `preexec_fn` setting `resource.setrlimit(RLIMIT_AS, (cap, cap))` where
-  `cap = memory_gib << 30`, then `communicate(request, timeout=...)`:
+  `cap = int(memory_gib * 2**30)` (float-safe: `--eval-memory-gib 8` parses
+  as a float and `<<` on a float raises `TypeError`), then
+  `communicate(request, timeout=...)`. `preexec_fn` is not thread-safe; the
+  evaluator carries a comment noting it is safe here because the runner is
+  single-threaded:
   - reply ok → `EvalOutcome` from the reply;
   - `TimeoutExpired` → kill the process group with SIGKILL, status
     `"timeout"`, error naming the deadline;
@@ -159,35 +166,51 @@ open A2 only after A1 merges, exactly as TASK_015 split its PR A.
   ```python
   @dataclass(frozen=True)
   class Condition:
-      proposer_id: str                 # "llm_edit" | "random_param"
-      allocator_id: str                # one of ALLOCATOR_IDS
-      interface: str                   # "forecast-v2" | "weights-v1"
-      reference_updater_id: str        # "reference" | "weights_reference"
-      system_prompt: str               # IMPROVER_SYSTEM_PROMPT in PR A
+      proposer_id: str  # "llm_edit" | "random_param"
+      allocator_id: str  # one of ALLOCATOR_IDS
+      interface: str  # "forecast-v2" | "weights-v1"
+      reference_updater_id: str  # "reference" | "weights_reference"
+      system_prompt: str  # IMPROVER_SYSTEM_PROMPT in PR A
 
-  CONDITIONS: dict[str, Condition]    # id -> condition, PR A adds the
-                                      # forecast-v2 space: predictive (the
-                                      # treatment), evaluate_all, fixed,
-                                      # random, bandit_ucb, bo_gp, shuffled,
-                                      # random_param (the non-LLM track of
-                                      # the treatment: random_param proposer,
-                                      # predictive allocator). PR B adds
-                                      # weights_only.
+
+  CONDITIONS: dict[str, Condition]  # id -> condition, PR A adds the
+  # forecast-v2 space: predictive (the
+  # treatment), evaluate_all, fixed,
+  # random, bandit_ucb, bo_gp, shuffled,
+  # random_param (the non-LLM track of
+  # the treatment: random_param proposer,
+  # predictive allocator). PR B adds
+  # weights_only.
+
 
   @dataclass(frozen=True)
   class LineageSpec:
-      condition: str; dataset: str; pool_spec: str
+      condition: str
+      dataset: str
+      pool_spec: str
       foundation_models: tuple[str, ...] | None
-      seed: int; proposals_per_generation: int; eval_slots: int
-      max_evaluations: int; max_generations: int
+      seed: int
+      proposals_per_generation: int
+      eval_slots: int
+      max_evaluations: int
+      max_generations: int
       budget_limits: Budget
-      eval_timeout_seconds: float; eval_memory_gib: float
-      client_config: LLMClientConfig | None   # None iff random_param
-      replay_of: str | None                    # run id when replaying
+      eval_timeout_seconds: float
+      eval_memory_gib: float
+      client_config: LLMClientConfig | None  # None iff random_param
+      replay_of: str | None  # run id when replaying
 
-  def run_lineage(spec: LineageSpec, *, ledger_root: Path, cache_root: Path,
-                  data_root: Path, manifest_dir: Path, foundation_root: Path,
-                  run_id: str) -> int: ...
+
+  def run_lineage(
+      spec: LineageSpec,
+      *,
+      ledger_root: Path,
+      cache_root: Path,
+      data_root: Path,
+      manifest_dir: Path,
+      foundation_root: Path,
+      run_id: str,
+  ) -> int: ...
   ```
 
   `run_lineage` returns the process exit code: 0 for `completed` and
@@ -225,23 +248,52 @@ open A2 only after A1 merges, exactly as TASK_015 split its PR A.
   (`updater_id` from the condition, `hyperparams` = the reference config,
   `pool="dev"`, status/metrics/error from the outcome, `per_task_blob` =
   `{"series_wall_seconds": [...], "result": result_obj}`), charged
-  `evaluations=1` and wall. If the baseline itself fails, the run ends
-  `failed` (summary says why) — a lineage cannot start without a parent
-  score. The runner keeps `current_source`, `current_record_id=None`,
+  `evaluations=1` and wall. If the baseline itself is not `ok` (`failed`,
+  `invalid_weights` or `timeout`), the run ends `aborted` — the ledger has
+  no `failed` run status — with the summary keys of **End** (all counts
+  zero, `starting_mase` and `best_mase` null) plus
+  `"error": "baseline <status>: <error text>"`, and the CLI exits 2; a
+  lineage cannot start without a parent score. The runner keeps
+  `current_source`, `current_record_id=None`,
   `current_mase` (from the baseline), `current_gain=0.0`, `records`
   (every record appended so far), `history: list[HistoryPoint]`, `spent`
   (budget accumulator).
-- **One generation**, while `spent.evaluations < max_evaluations`,
-  `spent.llm_* < limits`, run wall `< max_wall_seconds`, and
+- **Budget rule: reserve before acting.** No action starts unless its
+  worst-case charge still fits under every field of
+  `run_start.budget_limits`, so the summed charges can never overshoot a
+  limit and a `budget_exhausted` run still passes `validate_run` — the
+  exit-0 and verify-clean contracts hold together. Reservations, checked
+  immediately before each action:
+  - one proposal (`llm_edit`): remaining `llm_output_tokens` at least
+    `(1 + max_repair_rounds) * client_config.max_tokens` (at most two
+    calls, each capped at `max_tokens`), remaining `llm_input_tokens` at
+    least `PROPOSAL_INPUT_RESERVE_TOKENS = 200_000` (an order of magnitude
+    above the largest prompt the harness builds — parent source, diff and
+    observation together are a few thousand tokens — so no single call
+    charges more input than the reservation), and remaining `wall_seconds`
+    at least `(1 + max_repair_rounds) * client_config.max_attempts *
+    client_config.timeout_seconds` (per-attempt wall is capped by the
+    client timeout and backoff waits are recorded, not charged);
+  - one proposal (`random_param`): remaining `wall_seconds` at least
+    `PROPOSAL_WALL_RESERVE_SECONDS = 10.0` (no network, no tokens);
+  - one evaluation, the generation-0 baseline included:
+    `spent.evaluations < max_evaluations` and remaining `wall_seconds` at
+    least `eval_timeout_seconds + EVAL_WALL_MARGIN_SECONDS` with the
+    margin `60.0` (the child is killed at the deadline, so its charge is
+    bounded by the deadline plus parent-side overhead).
+  The CLI refuses, before `run_start`, a config that cannot reserve the
+  baseline (gate1's rule: no run starts that cannot run).
+- **One generation**, while `spent.evaluations < max_evaluations` and
   `generation < max_generations`:
   1. *Propose* `proposals_per_generation` times with `propose_and_record(
      run, proposer_id=..., parent_source=current_source,
      parent_record_id=current_record_id, generation, parent_gain=
      current_gain, history_records=records, rng, client, client_config,
-     max_repair_rounds=1)` — the merged signature unchanged. Budget is
-     re-checked between proposals; a limit binding mid-round ends the round
-     with the proposals made so far (a round needs at least one proposal to
-     continue, else the run ends `budget_exhausted`).
+     max_repair_rounds=1)` — the merged signature unchanged. Each
+     proposal's reservation is checked before it starts; a failed
+     reservation ends the round with the proposals made so far (a round
+     needs at least one proposal to continue, else the run ends
+     `budget_exhausted`).
   2. *Predict* for every proposal: build `ProposalFeatures` (family via
      `artifact_family`, `changed_lines` via `len(diff_lines(...))`, const
      stats via `const_change_stats`, `generation`, `parent_gain` clipped to
@@ -264,7 +316,10 @@ open A2 only after A1 merges, exactly as TASK_015 split its PR A.
      status/metrics/error from the outcome, `per_task_blob` as the
      baseline's, refers_to the proposal), charged `evaluations=1` and the
      parent-measured wall. A timeout is charged like any evaluation: the
-     slot was spent.
+     slot was spent. Each evaluation's reservation is checked before it
+     starts; a failed reservation ends the generation after the
+     bookkeeping of the evaluations already done, and the run ends
+     `budget_exhausted`.
   5. *Accept* immediately after each evaluation: `accepted = status == "ok"
      and mase < current_mase` (strict), `rule="hill_climb_v1"`,
      `new_artifact=child_artifact` iff accepted, refers_to
@@ -282,11 +337,12 @@ open A2 only after A1 merges, exactly as TASK_015 split its PR A.
   summary has exactly the keys `condition`, `generations`, `proposals`,
   `predictions`, `allocations`, `evaluations`, `accepted`, `starting_mase`,
   `best_mase`, `budget_spent` (the four budget sums), `wall_seconds_total`,
-  `replay_of` (or `null`) and — for a replay — `matches_source_run`
-  (true iff the source run's proposal child-artifact digests, evaluation
-  statuses and metrics compare equal; the replay re-evaluates for real and
-  must be bit-equal). The CLI then runs the same ledger `verify` gate1 runs
-  and exits non-zero on violations.
+  `replay_of` (or `null`) and — for a replay — `matches_source_run` and
+  `timeout_status_mismatches`, both defined under **Replay** below (the
+  replay re-evaluates for real). The CLI then runs the same ledger `verify`
+  gate1 runs and exits non-zero on violations; under the budget rule above
+  a `budget_exhausted` run has no violations, so its exit 0 and the verify
+  gate hold together.
 - **The RNG.** One `random.Random(seed)` for the whole run, threaded to the
   proposer and the allocator; no other randomness anywhere (the LLM path
   never draws).
@@ -294,6 +350,31 @@ open A2 only after A1 merges, exactly as TASK_015 split its PR A.
   `load_dev_pool`; `observation_object`'s non-dev guard can therefore never
   fire, and the child worker holds no ledger path at all — the ledger stays
   parent-only.
+- **Replay (`--replay-from`).** The replay reproduces the source run's
+  control flow from its ledger, not from the guards: with the zero-token
+  `RecordedLLMClient` and a different wall, the source's guard decisions
+  do not bind at the same points, so the engine must not re-derive them.
+  It reads the source run's records first and drives the loop by them:
+  each generation proposes exactly the source run's number of proposals
+  for that generation, the allocator's `decision.chosen` is truncated to
+  the source round's chosen count (exactly as a live run truncates it to
+  `evaluations_left`), and the run ends after the source's final
+  generation and evaluation counts. Token reservations cannot fail in a
+  replay (a replayed call charges zero tokens); the wall reservation still
+  applies, against a replay `budget_limits.wall_seconds` of
+  `max_wall_seconds + <the source run's wall_seconds_total> + 60.0` — a
+  replay repeats only the source's evaluations and pays no LLM waits, so
+  its wall spend stays under the source's on comparable hardware. If the
+  reservation fails anyway (a much slower machine), the replay ends
+  `budget_exhausted` with `matches_source_run` false and the reason in the
+  summary. `matches_source_run` is defined over exactly the aligned
+  sequence above: true iff every proposal's child-artifact digest, every
+  allocation's `chosen_ids` and every evaluation's status and metrics
+  compare bit-equal across source and replay. The summary also carries
+  `timeout_status_mismatches`, the number of aligned evaluations whose
+  status differs on exactly a `timeout`: timeouts are wall-dependent, so
+  such a mismatch is reported as-is and is not by itself a replay defect
+  (it still makes `matches_source_run` false).
 
 ### Tests for PR A (all required)
 
@@ -338,17 +419,35 @@ open A2 only after A1 merges, exactly as TASK_015 split its PR A.
 13. prediction-blind rivals: condition `fixed` — the spy allocator's
     candidates carry `{}` quantiles while `prediction` records exist for
     every proposal.
-14. budget binding mid-round: a tiny token limit — the round stops between
-    proposals, the made proposals still get predictions/allocation/
-    evaluation, run ends `budget_exhausted`.
-15. crash safety: an exception mid-generation (stubbed evaluator raising) —
+14. budget binding mid-round (tokens): an output-token limit that pays for
+    two proposals' reservations but not the third — exactly the reserved
+    proposals run (and get predictions, allocation, evaluation), the run
+    ends `budget_exhausted` with exit 0 and `validate_run(...) == []`; a
+    limit below one proposal's reservation ends the run `budget_exhausted`
+    right after the baseline, still exit 0 and violation-free.
+15. budget binding on wall: a stubbed evaluator charging real wall and a
+    small `--max-wall-seconds` — the evaluation reservation fails before
+    an evaluation that cannot pay, the run ends `budget_exhausted`,
+    exit 0, `validate_run(...) == []`.
+16. baseline failure: a stubbed baseline outcome of `failed` (and a
+    `timeout` variant) — the run ends `aborted` with the
+    `"baseline <status>: <error>"` summary, no proposal, prediction,
+    allocation, evaluation or acceptance record, exit 2, and the ledger
+    verifies.
+17. crash safety: an exception mid-generation (stubbed evaluator raising) —
     the run ends `aborted`, exit 2, the ledger verifies.
-16. replay: re-run a tiny lineage with `--replay-from` — zero llm tokens
+18. replay: re-run a tiny lineage with `--replay-from` — zero llm tokens
     charged anywhere in the replay run, identical child digests,
     `matches_source_run` true.
-17. CLI: unknown condition refused; llm_edit without `EVOLVETS_LLM_API_KEY`
+19. replay of a mid-round exhaustion: a source lineage that ended
+    `budget_exhausted` on a token reservation between proposals — the
+    replay proposes exactly the source's per-generation counts, ends at
+    the source's generation and evaluation counts, charges zero llm
+    tokens, and `matches_source_run` is true with `validate_run(...) == []`.
+20. CLI: unknown condition refused; llm_edit without `EVOLVETS_LLM_API_KEY`
    fails before any ledger write; `random_param` needs no key; the config
-   blob contains the env-var name but not the value.
+   blob contains the env-var name but not the value; a wall limit that
+   cannot reserve the baseline is refused before `run_start`.
 
 ### Dependencies
 
@@ -357,7 +456,7 @@ None. Standard library only (`subprocess`, `resource`, `os`, `signal`).
 ### Size
 
 ~750 changed lines expected; split into A1 (evaluator + tests 1–7) and A2
-(engine, conditions, CLI + tests 8–17) at the size rule, A2 after A1 merges.
+(engine, conditions, CLI + tests 8–20) at the size rule, A2 after A1 merges.
 
 ## PR B: `feat/phase1-weights-space`
 
@@ -436,11 +535,19 @@ Holdout scoring of accepted edits, in a run separate from the lineage.
 - `src/evolvets/runner/phase1_holdout.py`:
 
   ```python
-  def run_holdout(from_run: str, *, dataset: str, pool_spec: str,
-                  foundation_models: tuple[str, ...] | None,
-                  ledger_root: Path, cache_root: Path, data_root: Path,
-                  manifest_dir: Path, foundation_root: Path,
-                  run_id: str) -> int: ...
+  def run_holdout(
+      from_run: str,
+      *,
+      dataset: str,
+      pool_spec: str,
+      foundation_models: tuple[str, ...] | None,
+      ledger_root: Path,
+      cache_root: Path,
+      data_root: Path,
+      manifest_dir: Path,
+      foundation_root: Path,
+      run_id: str,
+  ) -> int: ...
   ```
 
 - `cli.py`: `evolvets phase1 holdout --from-run RUN_ID --dataset
@@ -546,7 +653,11 @@ done
 The budget guards (`--llm-max-input-tokens 2000000`,
 `--llm-max-output-tokens 200000`, `--max-wall-seconds 43200`) are the CLI
 defaults and identical for every condition: equal limits, honest charges,
-the evaluation limit designed to bind. The owner posts the run ids and the
+the evaluation limit designed to bind. Under the equal evaluation limit the
+slot-1 conditions make about three times `evaluate_all`'s proposals and LLM
+tokens — by design; entry 20's report charges and compares token spend per
+condition, so the gain-per-compute comparison is explicit rather than
+assumed. The owner posts the run ids and the
 workflow URL on the task-closing issue; entry 20's task consumes them.
 
 ## Closing the task

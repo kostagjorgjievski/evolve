@@ -21,6 +21,7 @@ from evolvets.arena.pool import FoundationCache, check_pool_spec, load_foundatio
 from evolvets.arena.realdata.prepare import PrepareError, load_public
 from evolvets.arena.synthetic import GENERATOR_VERSION
 from evolvets.arena.synthetic.grammar import FAMILIES, GrammarConfig, SyntheticTask
+from evolvets.arena.synthetic.holdout import HOLDOUT_INDEX_START
 from evolvets.arena.synthetic.oracle import true_best_forecast
 from evolvets.arena.synthetic.presets import SCAN_DATASETS, SCAN_PRESETS, preset_sha256, scan_tasks
 from evolvets.arena.synthetic.seeds import dev_tasks
@@ -226,6 +227,12 @@ def _scan_series(manifest: CacheManifest) -> tuple[DevSeries, ...]:
         )
     _check_generator_version(manifest.dataset, source)
     per_family = _source_per_family(manifest.dataset, source)
+    if per_family > HOLDOUT_INDEX_START:
+        raise ArenaError(
+            f"{manifest.dataset}: source.per_family {per_family} reaches scan index "
+            f"{HOLDOUT_INDEX_START} or beyond, into the holdout range; a scan cache holds "
+            "dev scan worlds only"
+        )
     expected: list[tuple[str, SyntheticTask]] = []
     for family in preset.families:
         for index, task in enumerate(scan_tasks(preset.name, family, per_family)):

@@ -5,7 +5,10 @@ API) into a real run directory, so blob references, the payload, the budget
 and ``validate_run`` are all checked the way (f)'s lineage loop will see
 them. The observation fixtures build records by hand — including a sealed
 evaluation that must never reach a prompt — and the replay test proves a
-proposal re-derives from its recorded responses at zero cost.
+proposal re-derives from its recorded responses at zero cost. The review of
+PR A2 added one more end-to-end path: a real ``HttpsLLMClient`` over a
+scripted ``post`` that raises mid-proposal must still be recorded, charged
+and replayable.
 """
 
 from __future__ import annotations
@@ -23,7 +26,14 @@ from evolvets.improver.artifacts import (
     diff_lines,
     validate_artifact_source,
 )
-from evolvets.improver.client import LLMClientConfig, LLMClientError, RecordedLLMClient, prompt_key
+from evolvets.improver.client import (
+    HttpsLLMClient,
+    LLMClientConfig,
+    LLMClientError,
+    RecordedLLMClient,
+    RecordedLLMFailure,
+    prompt_key,
+)
 from evolvets.improver.interfaces import IMPROVER_VERSION, LLMResponse
 from evolvets.improver.observations import ImproverError, observation_object
 from evolvets.improver.prompt import IMPROVER_SYSTEM_PROMPT, prompt_object, user_prompt
@@ -40,7 +50,12 @@ from evolvets.ledger.schema import ZERO_HASH, Budget, Record, make_record
 from evolvets.ledger.store import LedgerReader
 from evolvets.ledger.validate import validate_run
 from evolvets.runner.runs import Run
-from tests.improver.fake import ScriptedClient
+from tests.improver.fake import (
+    ScriptedClient,
+    ScriptedMonotonic,
+    ScriptedPost,
+    ScriptedSleep,
+)
 
 COMMIT = "a" * 40
 KEY = "sk-live-secret-never-recorded"
@@ -282,6 +297,234 @@ def test_fallback_after_failed_rounds(tmp_path: Path, monkeypatch: pytest.Monkey
     assert record.budget == Budget(llm_input_tokens=30, llm_output_tokens=13, wall_seconds=0.0)
     assert len(blob_json(run.blobs, payload.prompt_blob)) == 2
     assert len(blob_json(run.blobs, payload.response_blob)) == 2
+
+
+# --- Review fix (PR A2): the client raises during the proposal rounds ---------------
+
+
+def messages_body(text: str, input_tokens: int, output_tokens: int) -> str:
+    """A well-formed 2xx Messages body whose text block is the model reply."""
+    return json.dumps(
+        {
+            "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+            "stop_reason": "end_turn",
+        }
+    )
+
+
+def rate_limited_body(input_tokens: int, output_tokens: int = 0) -> str:
+    """A 429 body that reports usage (rate limits still bill their input tokens)."""
+    return json.dumps({"usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}})
+
+
+#: The repair prompt the unusable first reply of the exhausting client earns.
+REPAIR_SUFFIX = (
+    "\n\nYour previous reply could not be used: the reply contains no JSON object."
+    " Reply with only the JSON object described."
+)
+
+
+def exhausting_repair_client() -> tuple[HttpsLLMClient, ScriptedPost]:
+    """A real client whose first reply cannot parse and whose repair call exhausts.
+
+    The first call answers a well-formed 200 (usage 5000 in / 3000 out) whose
+    text is not JSON; the repair call meets two 429s (``max_attempts = 2``),
+    the first reporting 5000 input tokens, and raises. The scripted clock
+    makes the two calls' chargeable wall 1.0 + 9.0 seconds (the one wait
+    excluded), so the charged budget is exactly 10000 in / 3000 out / 10.0 s.
+    """
+    post = ScriptedPost(
+        (200, messages_body("i am not json at all", 5000, 3000)),
+        (429, rate_limited_body(5000)),
+        (429, "rate limited"),
+    )
+    client = HttpsLLMClient(
+        LLMClientConfig(max_attempts=2),
+        post=post,
+        sleep=ScriptedSleep(),
+        monotonic=ScriptedMonotonic(0.0, 1.0, 10.0, 21.0),
+    )
+    return client, post
+
+
+def test_client_error_during_repair_is_recorded_and_charged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's case (a): an unusable 200, then a repair that exhausts on 429s.
+
+    The proposal is still recorded — fallback no-op child, both calls' audits
+    in the response blob (the failed one with no text and the error message),
+    both calls' tokens charged including the 429 body's usage — and the run
+    validates. Nothing paid escapes the ledger (AGENTS.md 2.5, 2.8).
+    """
+    monkeypatch.setenv("EVOLVETS_LLM_API_KEY", KEY)
+    root = tmp_path / "ledgers"
+    run = start_run(root, "improver-exhausted")
+    client, post = exhausting_repair_client()
+    record = propose(run, client=client)
+    run.end("completed", {})
+
+    payload = record.payload
+    assert isinstance(payload, Proposal)
+    assert payload.child_artifact == payload.parent_artifact  # the fallback no-op
+    assert blob_json(run.blobs, payload.child_artifact) == REFERENCE_ARTIFACT_SOURCE
+    assert blob_json(run.blobs, payload.diff_blob) == ""
+    assert payload.diagnosis == (
+        "proposer fallback after 2 call(s): giving up after 2 attempts: HTTP 429 rate limited"
+    )
+    # 5000 + 3000 from the unusable 200, 5000 from the 429 body that reported usage
+    assert record.budget == Budget(
+        llm_input_tokens=10000, llm_output_tokens=3000, wall_seconds=10.0
+    )
+    assert run.spent.llm_input_tokens == 10000
+    assert run.spent.llm_output_tokens == 3000
+    assert len(post.sent) == 3  # one attempt for the 200, two for the 429s
+    base_user = user_prompt(REFERENCE_ARTIFACT_SOURCE, empty_observation())
+    prompts = blob_json(run.blobs, payload.prompt_blob)
+    assert [prompt["user"] for prompt in prompts] == [base_user, base_user + REPAIR_SUFFIX]
+    audits = blob_json(run.blobs, payload.response_blob)
+    assert audits[0] == {
+        "attempts": [{"ok": True, "status": 200, "error": None}],
+        "waits_seconds": [],
+        "input_tokens": 5000,
+        "output_tokens": 3000,
+        "stop_reason": "end_turn",
+        "text": "i am not json at all",
+    }
+    assert audits[1] == {
+        "attempts": [
+            {"ok": False, "status": 429, "error": "rate limited"},
+            {"ok": False, "status": 429, "error": "rate limited"},
+        ],
+        "waits_seconds": [2.0],
+        "input_tokens": 5000,
+        "output_tokens": 0,
+        "stop_reason": None,
+        "text": None,  # the mark of a call that raised
+        "error": "giving up after 2 attempts: HTTP 429 rate limited",
+    }
+    assert validate_run(records_of(root, "improver-exhausted")) == []
+    assert KEY not in json.dumps(prompts) + json.dumps(audits)
+
+
+def test_first_call_error_is_recorded_and_charged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's case (b): the first call itself exhausts — one fallback record, charged."""
+    monkeypatch.setenv("EVOLVETS_LLM_API_KEY", KEY)
+    root = tmp_path / "ledgers"
+    run = start_run(root, "improver-first-exhausted")
+    post = ScriptedPost((429, rate_limited_body(700, 300)), (429, "rate limited"))
+    client = HttpsLLMClient(
+        LLMClientConfig(max_attempts=2),
+        post=post,
+        sleep=ScriptedSleep(),
+        monotonic=ScriptedMonotonic(0.0, 5.0),  # wall 5.0 minus the one 2.0 wait
+    )
+    record = propose(run, client=client)
+    run.end("completed", {})
+
+    payload = record.payload
+    assert isinstance(payload, Proposal)
+    assert payload.child_artifact == payload.parent_artifact
+    assert payload.diagnosis == (
+        "proposer fallback after 1 call(s): giving up after 2 attempts: HTTP 429 rate limited"
+    )
+    assert record.budget == Budget(llm_input_tokens=700, llm_output_tokens=300, wall_seconds=3.0)
+    assert run.spent.llm_input_tokens == 700
+    base_user = user_prompt(REFERENCE_ARTIFACT_SOURCE, empty_observation())
+    prompts = blob_json(run.blobs, payload.prompt_blob)
+    assert [prompt["user"] for prompt in prompts] == [base_user]  # no repair round happened
+    audits = blob_json(run.blobs, payload.response_blob)
+    assert len(audits) == 1
+    assert audits[0]["text"] is None
+    assert audits[0]["error"] == "giving up after 2 attempts: HTTP 429 rate limited"
+    assert audits[0]["input_tokens"] == 700
+    assert validate_run(records_of(root, "improver-first-exhausted")) == []
+
+
+def test_missing_key_first_call_records_a_zero_cost_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error with no audit at all (``call`` is ``None``): zero counts, still recorded."""
+    monkeypatch.delenv("EVOLVETS_LLM_API_KEY", raising=False)
+    root = tmp_path / "ledgers"
+    run = start_run(root, "improver-no-key")
+    post = ScriptedPost()
+    client = HttpsLLMClient(
+        LLMClientConfig(), post=post, sleep=ScriptedSleep(), monotonic=ScriptedMonotonic()
+    )
+    record = propose(run, client=client)
+    run.end("completed", {})
+
+    payload = record.payload
+    assert isinstance(payload, Proposal)
+    assert payload.child_artifact == payload.parent_artifact
+    assert (
+        payload.diagnosis == "proposer fallback after 1 call(s): "
+        "the environment variable EVOLVETS_LLM_API_KEY is not set"
+    )
+    assert record.budget == Budget()  # nothing was attempted, so nothing is charged
+    assert run.spent.llm_input_tokens == 0
+    assert post.sent == []  # the key was missing: no request ever left
+    audits = blob_json(run.blobs, payload.response_blob)
+    assert audits == [
+        {
+            "attempts": [],
+            "waits_seconds": [],
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "stop_reason": None,
+            "text": None,
+            "error": "the environment variable EVOLVETS_LLM_API_KEY is not set",
+        }
+    ]
+    assert validate_run(records_of(root, "improver-no-key")) == []
+
+
+def test_replay_of_a_failed_proposal_reproduces_the_fallback_for_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's case (c): the failed proposal replays to the same child and diagnosis.
+
+    ``recorded_responses`` maps the repair prompt to a ``RecordedLLMFailure``
+    (the successful first call maps to its response), and ``RecordedLLMClient``
+    raises the recorded message, so the fallback draft is re-derived with zero
+    charged tokens and zero wall.
+    """
+    monkeypatch.setenv("EVOLVETS_LLM_API_KEY", KEY)
+    root = tmp_path / "ledgers"
+    run = start_run(root, "improver-failed-original")
+    original = propose(run, client=exhausting_repair_client()[0])
+    run.end("completed", {})
+
+    base_user = user_prompt(REFERENCE_ARTIFACT_SOURCE, empty_observation())
+    responses = recorded_responses(run.blobs, records_of(root, "improver-failed-original"))
+    assert len(responses) == 2
+    assert responses[prompt_key(IMPROVER_SYSTEM_PROMPT, base_user)] == LLMResponse(
+        "i am not json at all", 5000, 3000, "end_turn"
+    )
+    assert responses[prompt_key(IMPROVER_SYSTEM_PROMPT, base_user + REPAIR_SUFFIX)] == (
+        RecordedLLMFailure("giving up after 2 attempts: HTTP 429 rate limited")
+    )
+
+    replay_run = start_run(root, "improver-failed-replay")
+    replay = propose(replay_run, client=RecordedLLMClient(responses))
+    replay_run.end("completed", {})
+
+    original_payload, replay_payload = original.payload, replay.payload
+    assert isinstance(original_payload, Proposal)
+    assert isinstance(replay_payload, Proposal)
+    assert blob_json(replay_run.blobs, replay_payload.child_artifact) == blob_json(
+        run.blobs, original_payload.child_artifact
+    )
+    assert replay_payload.diagnosis == original_payload.diagnosis
+    assert replay.budget == Budget()  # the replay of a failure is free too
+    assert replay_run.spent.llm_input_tokens == 0
+    assert replay_run.spent.wall_seconds == 0.0
+    assert len(blob_json(replay_run.blobs, replay_payload.prompt_blob)) == 2  # both calls reissued
+    assert validate_run(records_of(root, "improver-failed-replay")) == []
 
 
 # --- Test 20: a genuine no-op ------------------------------------------------------

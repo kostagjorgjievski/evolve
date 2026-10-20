@@ -13,8 +13,12 @@ environment at call time — a configuration names the *variable*
 (``EVOLVETS_LLM_API_KEY``), never a value.
 
 ``prompt_key`` names a prompt by the canonical JSON of its two texts, and
-``RecordedLLMClient`` serves recorded responses by that name: the replay
-path, which makes no network call and charges zero tokens and zero wall.
+``RecordedLLMClient`` serves recorded outcomes by that name: the replay
+path, which makes no network call and charges zero tokens and zero wall. A
+prompt whose recorded call raised is served as :class:`RecordedLLMFailure`:
+``complete`` re-raises the recorded ``LLMClientError`` message, with no
+audit of its own (the replay attempted nothing), so the proposer re-derives
+the same fallback draft at zero cost.
 """
 
 from __future__ import annotations
@@ -301,27 +305,43 @@ class HttpsLLMClient:
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class RecordedLLMFailure:
+    """A recorded call that raised ``LLMClientError``: its message, replayed verbatim."""
+
+    message: str
+
+
 class RecordedLLMClient:
-    """Serves recorded responses by prompt; the replay path makes no network call.
+    """Serves recorded outcomes by prompt; the replay path makes no network call.
 
     A replayed call charges zero tokens and zero wall (``last_call`` is a
     zero-cost audit), so a lineage re-run from recorded responses costs
-    nothing — the replay is an audit, not a run.
+    nothing — the replay is an audit, not a run. A key mapped to a
+    :class:`RecordedLLMFailure` raises the recorded error instead, which is
+    how a proposal whose call failed replays to the same fallback draft.
     """
 
-    def __init__(self, responses: Mapping[str, LLMResponse]) -> None:
+    def __init__(self, responses: Mapping[str, LLMResponse | RecordedLLMFailure]) -> None:
         self._responses = dict(responses)
         #: the audit of the last complete(): a zero-cost synthetic success
         self.last_call: LLMCall | None = None
 
     def complete(self, system: str, user: str) -> LLMResponse:
-        """Return the recorded response for ``prompt_key(system, user)``, or raise."""
+        """Return the recorded response for ``prompt_key(system, user)``, or raise.
+
+        A recorded failure raises its recorded message; an unknown key raises
+        naming the key's SHA-256. Neither sets ``last_call`` — the replay
+        attempted nothing, so there is no audit to expose.
+        """
         key = prompt_key(system, user)
-        response = self._responses.get(key)
-        if response is None:
+        outcome = self._responses.get(key)
+        if outcome is None:
             raise LLMClientError(
                 "no recorded response for prompt key sha256:" + sha256_hex(key.encode("utf-8"))
             )
+        if isinstance(outcome, RecordedLLMFailure):
+            raise LLMClientError(outcome.message)
         self.last_call = LLMCall(
             attempts=(LLMAttempt(ok=True, status=None, error=None),),
             waits_seconds=(),
@@ -329,4 +349,4 @@ class RecordedLLMClient:
             output_tokens=0,
             wall_seconds=0.0,
         )
-        return response
+        return outcome

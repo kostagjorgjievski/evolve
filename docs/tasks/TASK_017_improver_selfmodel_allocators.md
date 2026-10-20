@@ -542,6 +542,13 @@ About 280 lines of implementation and 320 of tests. If it exceeds ~400 lines:
 - **(h) The meta level** (`feat/meta-replay`), entries 22 to 24, prompt caching, sharing one proposal stream across conditions, and any second model.
 - Re-tuning baselines, new datasets, and anything under `arena/`, `ledger/`, `cache/` or `updater/`.
 
+## Notes for the (f) task (from the PR A2 review, non-blocking)
+
+- **Early history is empty by construction.** `observation_object` skips every proposal whose parent artifact has no dev score, so all generation-0 proposals (until the first acceptance) see an empty `history`. Either give the lineage's starting artifact a dev score of its own or accept that early observations are empty — the reviewer left the choice to (f).
+- **`parent_metrics`** comes from the latest *accepted* proposal's evaluation, not "the parent artifact's most recent dev evaluation"; the two are equivalent under hill-climbing. If (f) ever branches from a non-latest artifact, pass the parent explicitly.
+- **`accepted`** in a history entry is `False` when no acceptance record follows yet; if (f) can build an observation between an evaluation and its acceptance, `None` (pending) would be the more honest value.
+- **`llm_edit` wall accounting** covers only the HTTP calls (the client's `wall_seconds`, waits excluded); parsing, validation and blob writes are uncharged. They are small, but the cost is untracked — the `random_param` path times its whole `random_propose`.
+
 ## Closing the task
 
 PR C (or the last PR of its split) sets this file's first line to `Status: done` and sets roadmap entries 16, 17 and 18 to the merged PR numbers. The runner (f) is the next task; the roadmap notes it.

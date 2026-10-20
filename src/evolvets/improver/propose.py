@@ -6,15 +6,21 @@ leaves at most unreferenced, content-addressed blobs, never a record pointing
 at a missing blob), then the record, charged through the budget accounting.
 The LLM proposer repairs malformed replies once per ``max_repair_rounds`` and
 falls back to a recorded no-op when every round fails — the failed calls are
-still part of the record (AGENTS.md 2.8). The random proposer needs no client
-at all: ``proposer.model = null`` is exactly the owner's non-LLM track, on
-which the self-model (PR B) and the allocators (PR C) are tested.
+still part of the record (AGENTS.md 2.8). A call that raises
+``LLMClientError`` (exhausted retries, a non-retryable 4xx, a missing key)
+ends the rounds the same way: its audit — no text, the error message — and
+its cost are recorded before the fallback no-op is written, so a paid call
+never goes uncharged (AGENTS.md 2.5, 2.8). The random proposer needs no
+client at all: ``proposer.model = null`` is exactly the owner's non-LLM
+track, on which the self-model (PR B) and the allocators (PR C) are tested.
 
 Every prompt and response is a blob, so a lineage replays from its records:
-``recorded_responses`` maps each call's prompt key to its recorded response
+``recorded_responses`` maps each call's prompt key to its recorded outcome
 and ``RecordedLLMClient`` serves them without a network call, charging zero
 tokens and zero wall. Repair prompts are distinct keys, so a whole call
-sequence replays. The API key never appears in a config blob, record, blob or
+sequence replays — including a failed one: an audit with no text marks a
+call that raised, and it replays as the recorded error, so the same fallback
+draft is re-derived at zero cost. The API key never appears in a config blob, record, blob or
 log: configuration carries the environment variable's name, and the client
 reads the value at call time.
 """
@@ -34,7 +40,13 @@ from evolvets.improver.artifacts import (
     normalized_source,
     validate_artifact_source,
 )
-from evolvets.improver.client import LLMCall, LLMClientConfig, prompt_key
+from evolvets.improver.client import (
+    LLMCall,
+    LLMClientConfig,
+    LLMClientError,
+    RecordedLLMFailure,
+    prompt_key,
+)
 from evolvets.improver.interfaces import IMPROVER_VERSION, LLMClient, LLMResponse
 from evolvets.improver.observations import observation_object
 from evolvets.improver.prompt import IMPROVER_SYSTEM_PROMPT, prompt_object, user_prompt
@@ -142,6 +154,36 @@ def _audit_object(call: LLMCall, response: LLMResponse) -> dict[str, object]:
     }
 
 
+def _error_audit_object(call: LLMCall | None, message: str) -> dict[str, object]:
+    """The audit of a call that raised: the transport trail it left, no reply.
+
+    ``text`` is ``None`` — the mark a failed call leaves in the response
+    blob; ``error`` carries the exception's message. A client that raised
+    before attempting anything (``call`` is ``None``, as on the replay path)
+    is audited with zero counts; the failed call's tokens and wall are
+    charged by the caller from ``call`` itself.
+    """
+    audited = (
+        call
+        if call is not None
+        else LLMCall(
+            attempts=(), waits_seconds=(), input_tokens=0, output_tokens=0, wall_seconds=0.0
+        )
+    )
+    return {
+        "attempts": [
+            {"ok": attempt.ok, "status": attempt.status, "error": attempt.error}
+            for attempt in audited.attempts
+        ],
+        "waits_seconds": list(audited.waits_seconds),
+        "input_tokens": audited.input_tokens,
+        "output_tokens": audited.output_tokens,
+        "stop_reason": None,
+        "text": None,
+        "error": message,
+    }
+
+
 def _llm_proposal(
     client: _AuditedClient,
     config: LLMClientConfig,
@@ -163,7 +205,21 @@ def _llm_proposal(
     failure = "no call was made"
     calls = 0
     for _ in range(1 + max_repair_rounds):
-        response = client.complete(system, user)
+        try:
+            response = client.complete(system, user)
+        except LLMClientError as error:
+            # a failed call is still part of the record: its audit and its cost
+            # are kept, no further call is made, and the fallback below writes
+            # the no-op (AGENTS.md 2.5 equal budgets, 2.8 report failures)
+            calls += 1
+            prompts.append(prompt_object(config, system, user))
+            audits.append(_error_audit_object(error.call, str(error)))
+            if error.call is not None:
+                input_tokens += error.call.input_tokens
+                output_tokens += error.call.output_tokens
+                wall_seconds += error.call.wall_seconds
+            failure = str(error)
+            break
         calls += 1
         call = client.last_call
         prompts.append(prompt_object(config, system, user))
@@ -331,14 +387,20 @@ def propose_and_record(
     )
 
 
-def recorded_responses(blobs: BlobStore, records: Iterable[Record]) -> dict[str, LLMResponse]:
-    """Map every recorded call's prompt key to its response, from the proposals' blobs.
+def recorded_responses(
+    blobs: BlobStore, records: Iterable[Record]
+) -> dict[str, LLMResponse | RecordedLLMFailure]:
+    """Map every recorded call's prompt key to its outcome, from the proposals' blobs.
 
     Each proposal's prompt blob is the list of its calls' prompt objects and
-    its response blob the matching list of audits, so every call — a repair
-    round's included — is keyed and a whole sequence replays.
+    its response blob the matching list of audits. An audit with a text is a
+    successful call and maps to its :class:`LLMResponse`; an audit with no
+    text marks a call that raised :class:`LLMClientError` and maps to a
+    :class:`RecordedLLMFailure` carrying the recorded message, so a failed
+    proposal replays — through :class:`RecordedLLMClient` raising that
+    message — to the same fallback draft at zero cost.
     """
-    responses: dict[str, LLMResponse] = {}
+    responses: dict[str, LLMResponse | RecordedLLMFailure] = {}
     for record in records:
         if record.kind != "proposal" or not isinstance(record.payload, Proposal):
             continue
@@ -353,10 +415,14 @@ def recorded_responses(blobs: BlobStore, records: Iterable[Record]) -> dict[str,
             "list[dict[str, object]]", json.loads(blobs.get(response_blob).decode("utf-8"))
         )
         for prompt, audit in zip(prompts, audits, strict=True):
-            responses[prompt_key(str(prompt["system"]), str(prompt["user"]))] = LLMResponse(
-                text=str(audit["text"]),
-                input_tokens=int(cast("int", audit["input_tokens"])),
-                output_tokens=int(cast("int", audit["output_tokens"])),
-                stop_reason=cast("str | None", audit["stop_reason"]),
-            )
+            key = prompt_key(str(prompt["system"]), str(prompt["user"]))
+            if audit["text"] is None:  # the mark of a call that raised
+                responses[key] = RecordedLLMFailure(str(audit["error"]))
+            else:
+                responses[key] = LLMResponse(
+                    text=str(audit["text"]),
+                    input_tokens=int(cast("int", audit["input_tokens"])),
+                    output_tokens=int(cast("int", audit["output_tokens"])),
+                    stop_reason=cast("str | None", audit["stop_reason"]),
+                )
     return responses

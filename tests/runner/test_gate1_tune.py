@@ -26,6 +26,7 @@ from evolvets.arena.errors import ArenaError
 from evolvets.arena.evaluate import replay_dataset, result_to_obj
 from evolvets.arena.oracles import oracle_dataset, oracle_to_obj
 from evolvets.arena.pool import pool_leakage_risk
+from evolvets.arena.synthetic.holdout import HOLDOUT_DATASETS
 from evolvets.cache.datasets import CACHE_DATASETS, public_inputs
 from evolvets.cache.store import build_cache, cache_id
 from evolvets.foundation.fake import FAKE_SPEC, FakeAdapter
@@ -757,3 +758,25 @@ def test_tune_over_a_scan_dataset(shift1_env: dict[str, Path], tmp_path: Path) -
         assert isinstance(entry, Baseline)
         if entry.status == "ok" and entry.updater_id != "oracle":
             assert "oracle_mase" in entry.metrics  # the hindsight oracle rides on replays
+
+
+# --- TASK_016 PR C: holdouts are never tuned on (test 10) -----------------------------------------
+
+
+@pytest.mark.parametrize("dataset", HOLDOUT_DATASETS)
+def test_tune_refuses_a_holdout_dataset(
+    dataset: str, synthetic_env: dict[str, Path], tmp_path: Path
+) -> None:
+    """A holdout dataset is refused before anything is loaded or written."""
+    ledger = tmp_path / "ledgers"
+    with pytest.raises(ValueError, match="is a holdout dataset: holdouts score accepted"):
+        run_tune(synthetic_env, ledger, spec=tune_spec(datasets=(dataset,)))
+    assert not ledger.exists()
+
+
+def test_cli_tune_rejects_a_holdout_dataset() -> None:
+    """argparse rejects a holdout dataset: holdouts are never tuned on, never probed."""
+    with pytest.raises(SystemExit):
+        cli.main(
+            ["gate1", "tune", "--dataset", "synthetic-shift2-holdout", "--pool-spec", "simple"]
+        )

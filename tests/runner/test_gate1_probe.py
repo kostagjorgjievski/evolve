@@ -21,6 +21,7 @@ import pytest
 from evolvets.arena.dev import load_dev_pool
 from evolvets.arena.errors import ArenaError
 from evolvets.arena.evaluate import replay_dataset, result_to_obj
+from evolvets.arena.synthetic.holdout import HOLDOUT_DATASETS
 from evolvets.arena.versions import protocol_versions
 from evolvets.cache.datasets import public_inputs
 from evolvets.cache.store import build_cache
@@ -705,3 +706,34 @@ def test_cli_probe_refuses_a_dirty_tree(
     out = capsys.readouterr().out.splitlines()
     assert out == ["FAIL working tree has uncommitted changes; commit before starting a run"]
     assert not ledger.exists()
+
+
+# --- TASK_016 PR C: holdouts are never probed (test 10) -------------------------------------------
+
+
+@pytest.mark.parametrize("dataset", HOLDOUT_DATASETS)
+def test_probe_refuses_a_holdout_dataset(
+    dataset: str, synthetic_env: dict[str, Path], tmp_path: Path
+) -> None:
+    """A holdout dataset is refused before anything is read or written."""
+    ledger = tmp_path / "ledgers"
+    with pytest.raises(ValueError, match="is a holdout dataset: holdouts score accepted"):
+        run_probe(synthetic_env, ledger, spec=probe_spec(datasets=(dataset,)))
+    assert not (ledger / "probe-none").exists()
+
+
+def test_cli_probe_rejects_a_holdout_dataset() -> None:
+    """argparse rejects a holdout dataset: holdouts score accepted edits only."""
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "gate1",
+                "probe",
+                "--tune-run",
+                "tune-1",
+                "--dataset",
+                "synthetic-shift3-holdout",
+                "--pool-spec",
+                "simple",
+            ]
+        )

@@ -1,4 +1,4 @@
-Status: active
+Status: done (PR A merged as #145; PR B as #146 with its CLI split #147; PR C split by the size rule into C1 #152 and C2 #153)
 
 # Task 016: forecast-output updaters (option B) and fresh-seed holdout replicates
 

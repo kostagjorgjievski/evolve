@@ -1,11 +1,11 @@
 """CLI tests for ``evolvets arena``: dev replays and oracles (TASK_010 PR C, test 8).
 
 Both commands are dev only: the dataset choices are the dev datasets (the
-cache datasets plus the scan presets, TASK_015), so a sealed name never
-reaches the pool loader, and neither command takes a sealed path or a ledger
-path. One canonical-JSON line per run, with the per-series detail stripped; an
-``ArenaError`` is a FAIL line and exit 1, while a failed updater is a result
-like any other and exits 0.
+cache datasets, the scan presets of TASK_015 and the holdout replicates of
+TASK_016 PR C), so a sealed name never reaches the pool loader, and neither
+command takes a sealed path or a ledger path. One canonical-JSON line per
+run, with the per-series detail stripped; an ``ArenaError`` is a FAIL line
+and exit 1, while a failed updater is a result like any other and exits 0.
 """
 
 from __future__ import annotations
@@ -173,3 +173,38 @@ def test_oracle_over_a_scan_dataset(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert set(payload) == {"result", "wall_seconds"}
     assert payload["result"]["dataset"] == "synthetic-shift3"
     assert "series" not in payload["result"]
+
+
+def test_oracle_and_replay_over_a_holdout_dataset(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``arena oracle`` and ``arena replay`` accept a holdout (TASK_016 PR C, test 11)."""
+    cache_root = tmp_path / "cache_store"
+    source, series = public_inputs("synthetic-shift3-holdout", tmp_path, tmp_path, per_family=1)
+    build_cache("synthetic-shift3-holdout", source, series, cache_root)
+    argv = [
+        "--cache-root",
+        str(cache_root),
+        "--data-root",
+        str(tmp_path),
+        "--manifest-dir",
+        str(tmp_path),
+    ]
+    code = cli.main(["arena", "oracle", "synthetic-shift3-holdout", *argv])
+    assert code == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 1, out
+    payload = json.loads(out[0])
+    assert set(payload) == {"result", "wall_seconds"}
+    assert payload["result"]["dataset"] == "synthetic-shift3-holdout"
+    assert "series" not in payload["result"]
+
+    code = cli.main(
+        ["arena", "replay", "synthetic-shift3-holdout", "--updater", "fixed_share", *argv]
+    )
+    assert code == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 1, out
+    result = json.loads(out[0])["result"]
+    assert result["status"] == "ok"
+    assert result["updater_interface"] == "weights-v1"

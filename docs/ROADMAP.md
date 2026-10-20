@@ -50,8 +50,8 @@ Owner plan (#142): the object is the updater, under the option-B interface. Leve
 
 | # | Branch | Content | Status |
 |---|---|---|---|
-| 14 | `protocol/forecast-updaters` + `feat/forecast-updater-reference` | (a) Updater interface `forecast-v2` beside `weights-v1`, `ARENA_VERSION = "4"` with weights-only scores unchanged; reference forecast-output updater `bias_share` | TASK_016 |
-| 15 | `feat/holdout-replicates` | (b) Fresh-seed holdout replicates `synthetic-shift2-holdout` and `synthetic-shift3-holdout` (scan indexes from 1000), never tuned on; owner-dispatched cache builds (W11) | TASK_016 |
+| 14 | `protocol/forecast-updaters` + `feat/forecast-updater-reference` | (a) Updater interface `forecast-v2` beside `weights-v1`, `ARENA_VERSION = "4"` with weights-only scores unchanged; reference forecast-output updater `bias_share` | merged (#145, #146, #147) |
+| 15 | `feat/holdout-replicates` | (b) Fresh-seed holdout replicates `synthetic-shift2-holdout` and `synthetic-shift3-holdout` (scan indexes from 1000), never tuned on; owner-dispatched cache builds (W11) | merged (#152, #153) |
 | 16 | `feat/improver-harness` | (c) LLM improver: recorded prompts and responses as blobs, token accounting, `proposal` records, replay from recorded responses | TASK_017 |
 | 17 | `feat/selfmodel` | (d) Self-model: per-proposal gain quantiles, `prediction` records flushed before evaluation | TASK_017 |
 | 18 | `feat/allocators` | (e) Allocator slot, the self-model allocator and the rival allocators (fixed, random, bandit, BO, evaluate-everything with replay selection) | TASK_017 |

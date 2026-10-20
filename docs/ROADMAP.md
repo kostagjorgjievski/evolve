@@ -54,7 +54,7 @@ Owner plan (#142): the object is the updater, under the option-B interface. Leve
 | 15 | `feat/holdout-replicates` | (b) Fresh-seed holdout replicates `synthetic-shift2-holdout` and `synthetic-shift3-holdout` (scan indexes from 1000), never tuned on; owner-dispatched cache builds (W11) | merged (#152, #153) |
 | 16 | `feat/improver-harness` | (c) LLM improver: recorded prompts and responses as blobs, token accounting, `proposal` records, replay from recorded responses | merged (#155, #156) |
 | 17 | `feat/selfmodel` | (d) Self-model: per-proposal gain quantiles, `prediction` records flushed before evaluation | merged (#157) |
-| 18 | `feat/allocators` | (e) Allocator slot, the self-model allocator and the rival allocators (fixed, random, bandit, BO, evaluate-everything with replay selection) | merged (#159) |
+| 18 | `feat/allocators` | (e) Allocator slot, the self-model allocator and the rival allocators (fixed, random, bandit, BO, evaluate-everything with replay selection) | merged (#160) |
 | 19 | `feat/phase1-runner` | (f) Run CLI with conditions and equal budget accounting; holdout scoring of accepted edits only; detached sp-1 launcher (`.github/scripts/`, owner-applied) | spec pending: next task after TASK_017 (#150) |
 | 20 | `exp/phase1-report` | (g) Report: gain per unit of compute, calibration, safe-inheritance rate, regenerable from the ledger | spec pending: next task after TASK_017 (#150) |
 | 21 | `feat/meta-replay` | (h) Meta level: revise the allocator and the self-model by replaying the ledger history against the frozen arena | spec pending: next task after TASK_017 (#150) |

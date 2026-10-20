@@ -11,10 +11,12 @@ statement could not run there even if one were allowed.
 protocol guard — it keeps an LLM proposal a *kind* of program (no imports, no
 f-strings, no ``while``/``try``, no comprehensions, only the pinned calls and
 ``raise ValueError(<one argument>)``, no rebinding of any pinned name, no
-keyword arguments, no method objects as values) — not a wall-clock or
-resource sandbox: a huge ``range(...)`` literal can still burn CPU or memory,
-so (f)'s evaluation timeout has to bound that too. The arena still validates
-every output an artifact returns. Every rejection message names the construct.
+dunder name loaded or bound anywhere — ``__builtins__`` is the sandbox's
+builtins dict itself, and no artifact may reach it, no keyword arguments, no
+method objects as values) — not a wall-clock or resource sandbox: a huge
+``range(...)`` literal can still burn CPU or memory, so (f)'s evaluation
+timeout has to bound that too. The arena still validates every output an
+artifact returns. Every rejection message names the construct.
 
 The reference artifact is ``bias_share`` translated into the grammar
 operation for operation (``updater/forecast.py`` with ``updater/baselines.py``
@@ -169,7 +171,11 @@ class _Validator:
     assignment or loop target, not by a nested def's parameter or its own
     name. That is what makes the pinned-call rule a boundary and not a style
     preference: an artifact cannot store a method (``str.format`` above all)
-    under an allowed name and have a call resolve to it.
+    under an allowed name and have a call resolve to it. And no dunder name
+    may appear anywhere, as a load, a target, a parameter or a def's own
+    name: the sandbox's one dunder global is ``__builtins__`` — the builtins
+    dict itself — and a subscript store into it would rebind any pinned
+    builtin or hold state across series (see ``_is_dunder``).
     """
 
     def __init__(self, tree: ast.Module) -> None:
@@ -241,6 +247,12 @@ class _Validator:
                 f"{node.name} must take exactly the parameters {list(pinned)}, got {list(names)}"
             )
         for name in names:
+            if _is_dunder(name):
+                raise ArtifactError(
+                    f"the parameter {name!r} of {node.name} is a dunder name: the sandbox's "
+                    "one dunder global is __builtins__ — the builtins dict itself — and no "
+                    "artifact may reach it"
+                )
             if name in self._reserved:
                 raise ArtifactError(
                     f"the parameter {name!r} of {node.name} shadows a pinned name; the "
@@ -252,6 +264,12 @@ class _Validator:
 
     def _check_nested_def(self, node: ast.FunctionDef, visible: frozenset[str]) -> None:
         """Check a nested helper: a fresh name, plain parameters, the same body rules."""
+        if _is_dunder(node.name):
+            raise ArtifactError(
+                f"a nested def must not be named {node.name!r}: the sandbox's one dunder "
+                "global is __builtins__ — the builtins dict itself — and no artifact may "
+                "reach it"
+            )
         if node.name in ARTIFACT_BUILTINS or node.name == "math":
             raise ArtifactError(
                 f"a nested def must not be named {node.name!r}; the sandbox's pinned "
@@ -355,6 +373,12 @@ class _Validator:
                 "only str, bool, int and float"
             )
         if isinstance(node, ast.Name):
+            if _is_dunder(node.id):
+                raise ArtifactError(
+                    f"the dunder name {node.id!r} may not be loaded: the sandbox's one "
+                    "dunder global is __builtins__ — the builtins dict itself — and no "
+                    "artifact may reach it"
+                )
             return
         if isinstance(node, ast.Attribute):
             self._check_attribute(node, visible)
@@ -475,6 +499,12 @@ class _Validator:
         builtins, ``math``, the artifact's own functions — are never rebindable.
         """
         if isinstance(node, ast.Name):
+            if _is_dunder(node.id):
+                raise ArtifactError(
+                    f"{what} must not bind the dunder name {node.id!r}: the sandbox's one "
+                    "dunder global is __builtins__ — the builtins dict itself — and no "
+                    "artifact may reach it"
+                )
             if node.id in self._reserved:
                 raise ArtifactError(
                     f"{what} must not bind the pinned name {node.id!r}; the sandbox's "
@@ -529,6 +559,21 @@ def _is_docstring(statement: ast.stmt) -> bool:
     )
 
 
+def _is_dunder(name: str) -> bool:
+    """Whether a name starts and ends with ``__`` — the attribute rule's twin for names.
+
+    The sandbox namespace seeds exactly one dunder name, ``__builtins__``, and
+    it is the builtins dict the loader builds: loading it (directly or through
+    an alias) would let an artifact rebind any pinned builtin with a subscript
+    store — ``__builtins__["len"] = config.clear`` runs ``config.clear`` as
+    ``len()`` — or hold state in the dict outside the state object (the
+    round-2 review payloads did both). The general rule, not a check for that
+    one name, also closes any dunder a future loader might seed; the reference
+    artifact uses none.
+    """
+    return name.startswith("__") and name.endswith("__")
+
+
 def validate_artifact_source(source: str) -> None:
     """Raise :class:`ArtifactError` unless ``source`` is exactly the artifact grammar.
 
@@ -538,7 +583,9 @@ def validate_artifact_source(source: str) -> None:
     ``if``, ``return``, assignments, augmented assignments, ``pass``, string
     docstrings, allowed calls as statements and ``raise ValueError(<one
     argument>)``; and, within expressions, only finite str/bool/int/float
-    constants, names, non-dunder attributes (``math`` restricted to
+    constants, names (never a dunder name: the sandbox's ``__builtins__``
+    global is the builtins dict itself, unreachable as a load, a target, a
+    parameter or a def's name), non-dunder attributes (``math`` restricted to
     :data:`MATH_MEMBERS`; ``.format``/``.format_map`` nowhere; ``.pop``/
     ``.append`` only as the called method, never as a value), tuples, lists,
     dicts, subscripts, slices, calls (the pinned builtins, artifact-defined
@@ -605,16 +652,19 @@ class _ArtifactUpdater:
 def artifact_updater(source: str) -> Callable[[], ForecastUpdater]:
     """Validate ``source``, then return a factory of adapters that run it as an updater.
 
-    The artifact is compiled and executed once, in a namespace whose globals
+    The artifact is validated and compiled exactly once. Every adapter the
+    factory returns executes that code in its own namespace, whose globals
     are exactly ``{"__builtins__": dict(ARTIFACT_BUILTINS), "math": math}``:
     no ``__import__``, no ``open``, no ``eval``. No import statement is
     allowed, so none ever needs ``__import__``; ``math`` arrives as a global.
     And the grammar leaves no call to divert: no pinned name can be rebound,
+    no dunder name (``__builtins__`` above all) can be loaded or bound,
     keyword arguments are not granted, and the only methods ever called are
     one-argument ``.pop``/``.append`` — so no artifact code can invoke a
     method (``str.format`` above all) on anything. The functions are
-    stateless — state travels through the state object — so the one
-    namespace serves every series, one adapter per replay.
+    stateless — state travels through the state object — and each adapter
+    execs into a namespace of its own, builtins dict included, so no channel
+    crosses series even if a future grammar change re-opened a route into it.
 
     ``update`` returns whatever the artifact returns as ``(output, state)``
     and dispatches on shape: when the first element of ``output`` is itself a
@@ -631,9 +681,15 @@ def artifact_updater(source: str) -> Callable[[], ForecastUpdater]:
         # sandbox namespace holds exactly the seeded globals and the two defs
         tree.body = tree.body[1:]
     code = compile(tree, "<evolvets updater artifact>", "exec")
-    namespace: dict[str, object] = {"__builtins__": dict(ARTIFACT_BUILTINS), "math": math}
-    exec(code, namespace)
-    return lambda: _ArtifactUpdater(namespace)
+
+    def adapter() -> ForecastUpdater:
+        # defence in depth: a fresh namespace (and builtins dict) per adapter,
+        # so nothing one series does can reach another's replay
+        namespace: dict[str, object] = {"__builtins__": dict(ARTIFACT_BUILTINS), "math": math}
+        exec(code, namespace)
+        return _ArtifactUpdater(namespace)
+
+    return adapter
 
 
 # --- diffs, families and constants ------------------------------------------------

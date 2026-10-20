@@ -5,11 +5,14 @@ construct, one accept-and-run case that exercises every allowed construct, a
 sandbox check that the loader's namespace is exactly the pinned builtins and
 ``math``, and the reference artifact: bias_share translated into the grammar,
 which must replay bit-equal to the class original. The rejection cases
-include the two escape routes closed after the PR A1 review — rebinding a
-pinned name to smuggle a method under an allowed call name, and handing a
-method to a builtin through a keyword argument. The unit drives use
-``tests/updater/test_forecast.py``'s helpers; the replay test builds the same
-synthetic-dev fixture pool as ``tests/updater/test_baselines_replay.py``.
+include the escape routes closed after the PR A1 review — rebinding a
+pinned name to smuggle a method under an allowed call name, handing a
+method to a builtin through a keyword argument, and (round 2)
+``__builtins__``: the sandbox's builtins dict, loadable as a name and
+rebindable by a subscript store, which is why no dunder name is anywhere.
+The unit drives use ``tests/updater/test_forecast.py``'s helpers; the replay
+test builds the same synthetic-dev fixture pool as
+``tests/updater/test_baselines_replay.py``.
 """
 
 from __future__ import annotations
@@ -468,6 +471,54 @@ def _rejects() -> list[tuple[str, str, str]]:
             ),
             "keyword arguments in a call are not allowed",
         ),
+        # --- the __builtins__ route (PR A1 review, round 2) ------------------------
+        # __builtins__ resolves to the sandbox's builtins dict, so loading it
+        # would let an artifact rebind any pinned builtin by a subscript store
+        # (config.clear running as len()) or keep cross-series state in the
+        # dict. No dunder name may be loaded or bound, by any form.
+        (
+            "builtins-subscript-store",
+            _artifact(
+                init_body='    __builtins__["len"] = config.clear\n    len()\n    return {}\n'
+            ),
+            "the dunder name '__builtins__' may not be loaded",
+        ),
+        (
+            "builtins-alias-load",
+            _artifact(update_body="    b = __builtins__\n    return ({}, state)\n"),
+            "the dunder name '__builtins__' may not be loaded",
+        ),
+        (
+            "builtins-bare-load",
+            _artifact(update_body="    value = __builtins__\n    return ({}, state)\n"),
+            "the dunder name '__builtins__' may not be loaded",
+        ),
+        (
+            "builtins-name-bind",
+            _artifact(update_body="    __builtins__ = {}\n    return ({}, state)\n"),
+            "an assignment must not bind the dunder name '__builtins__'",
+        ),
+        (
+            "builtins-for-target",
+            _artifact(
+                update_body="    for __builtins__ in [1]:\n        pass\n    return ({}, state)\n"
+            ),
+            "a for-loop target must not bind the dunder name '__builtins__'",
+        ),
+        (
+            "builtins-nested-param",
+            _artifact(
+                update_body="    def helper(__builtins__):\n        pass\n    return ({}, state)\n"
+            ),
+            "the parameter '__builtins__' of helper is a dunder name",
+        ),
+        (
+            "builtins-nested-def-name",
+            _artifact(
+                update_body="    def __len__(x):\n        return x\n    return ({}, state)\n"
+            ),
+            "a nested def must not be named '__len__'",
+        ),
     ]
 
 
@@ -520,6 +571,35 @@ def test_format_sys_modules_payload_is_rejected_before_exec() -> None:
         validate_artifact_source(FORMAT_SYS_MODULES_PAYLOAD)
     with pytest.raises(ArtifactError, match=re.escape("pinned name 'len'")):
         artifact_updater(FORMAT_SYS_MODULES_PAYLOAD)
+
+
+#: The PR A1 round-2 review payload: ``__builtins__`` is the sandbox's builtins
+#: dict, so binding ``len`` in it by a subscript store re-opens every method
+#: call (``config.clear`` runs as ``len()``) and the dict is state outside the
+#: state object. The dunder-name rule refuses it first.
+BUILTINS_REBIND_PAYLOAD = """def init(n_experts, horizon, config, seed):
+    __builtins__["len"] = config.clear
+    len()
+    return {"h": horizon}
+
+
+def update(state, feedback, context):
+    return ([0.0] * state["h"], state)
+"""
+
+
+def test_builtins_rebind_payload_is_rejected_before_exec() -> None:
+    """The __builtins__ rebind payload is refused at validation, before compile or exec.
+
+    The payload empties the caller's config as soon as ``init`` runs (round 2
+    of review demonstrated it), so the only way this can raise the validator's
+    own error is that validation ran first: the loader refuses the source
+    without ever compiling it, so no adapter — and no ``init`` — ever exists.
+    """
+    with pytest.raises(ArtifactError, match=re.escape("the dunder name '__builtins__'")):
+        validate_artifact_source(BUILTINS_REBIND_PAYLOAD)
+    with pytest.raises(ArtifactError, match=re.escape("the dunder name '__builtins__'")):
+        artifact_updater(BUILTINS_REBIND_PAYLOAD)
 
 
 def test_helper_scope_is_per_function() -> None:
@@ -688,6 +768,30 @@ def test_sandbox_namespace_is_exactly_the_pinned_set() -> None:
     assert namespace["math"] is math
     for banned in ("__import__", "open", "eval", "exec", "print", "repr", "type", "set", "sum"):
         assert banned not in builtins
+
+
+def test_each_adapter_gets_its_own_namespace() -> None:
+    """Defence in depth: every adapter execs into its own namespace and builtins dict.
+
+    The grammar cannot reach ``__builtins__`` (the dunder-name rule), but a
+    future grammar change that re-opened a route into it must still not let
+    one series' run read or write another's: the builtins dicts are separate
+    objects, one per adapter, so a mutation of one adapter's dict never
+    appears in another's — and both adapters still run the same source.
+    """
+    factory = artifact_updater(REFERENCE_ARTIFACT_SOURCE)
+    first, second = factory(), factory()
+    assert first.namespace is not second.namespace
+    first_builtins = first.namespace["__builtins__"]
+    second_builtins = second.namespace["__builtins__"]
+    assert isinstance(first_builtins, dict)
+    assert isinstance(second_builtins, dict)
+    assert first_builtins is not second_builtins
+    first_builtins["leak"] = 111  # the cross-series channel of round 2, seeded directly
+    assert "leak" not in second_builtins
+    first_state = first.init(2, 2, CONFIG, 0)
+    second_state = second.init(2, 2, CONFIG, 0)
+    assert first_state == second_state  # the untouched namespace answers identically
 
 
 # --- Test 8: normalisation --------------------------------------------------------

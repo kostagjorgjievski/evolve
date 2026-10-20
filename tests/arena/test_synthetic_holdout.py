@@ -15,7 +15,7 @@ import pytest
 from evolvets.arena.dev import load_dev_pool
 from evolvets.arena.errors import ArenaError
 from evolvets.arena.sealed.names import SEALED_DATASETS
-from evolvets.arena.synthetic.grammar import make_task
+from evolvets.arena.synthetic.grammar import GrammarConfig, SyntheticTask, make_task
 from evolvets.arena.synthetic.holdout import (
     HOLDOUT_DATASETS,
     HOLDOUT_INDEX_START,
@@ -28,14 +28,21 @@ from evolvets.arena.synthetic.holdout import (
 from evolvets.arena.synthetic.presets import (
     SCAN_DATASETS,
     SCAN_PRESETS,
+    preset_sha256,
     scan_world_seed,
 )
 from evolvets.cache.datasets import CACHE_DATASETS, public_inputs
 from evolvets.cache.store import CacheError, build_cache, cache_dir
 from tests.arena.test_synthetic_presets import GOLDEN_SHIFT1_SUDDEN_0
 
-#: The holdout range as one number, pinned: [1000, 2000).
-_HOLDOUT_WIDTH = HOLDOUT_INDEX_STOP - HOLDOUT_INDEX_START
+#: The digest of every scan preset, pinned by hand from TASK_015's presets:
+#: every existing scan cache pins its manifest to these, so none may move.
+GOLDEN_SCAN_PRESET_SHA256 = {
+    "synthetic-shift1": "98bb9d5f7649fba3945c7042ed4a1c14ea9190178851e87cef56ecd365c8f62d",
+    "synthetic-shift2": "1e05fb8c517ecf5321e966b258c43722185a64c9bd98a03ea42a643f8051d302",
+    "synthetic-shift3": "9725496c38beaa085f7dae06d877585fa74d6106e1c79a11ee34c3f1f57b06fa",
+    "synthetic-wide": "3e310162711221ca853065b14504c30abfc69e2e1c30bc1a65cbd4ecdf5be72f",
+}
 
 
 # --- Test 1: the registry ------------------------------------------------------------------------
@@ -143,30 +150,43 @@ def test_the_first_holdout_world_differs_from_dev_scan_index_0(name: str) -> Non
 
 
 @pytest.mark.parametrize("name", HOLDOUT_DATASETS)
-def test_each_holdout_uses_its_base_config_and_families(name: str) -> None:
-    """The base's config is used as-is (identity) and its families are the shift ones."""
-    base = SCAN_PRESETS[HOLDOUT_PRESETS[name].base]
-    assert base.families == ("sudden", "gradual", "recurring", "false_drift", "mixed")
-    task = holdout_tasks(name, "sudden", 1)[0]
-    hand = make_task(
-        "sudden", scan_world_seed(base.name, "sudden", HOLDOUT_INDEX_START), base.config
-    )
-    assert task.world.spec == hand.world.spec
+def test_each_holdout_uses_its_base_config_and_families(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every make_task call gets the base's own config object (identity), per its families."""
+    base = HOLDOUT_PRESETS[name].base
+    families = SCAN_PRESETS[base].families
+    assert families == ("sudden", "gradual", "recurring", "false_drift", "mixed")
+    assert families == SCAN_PRESETS[base].families
+    configs: list[GrammarConfig] = []
+    real_make_task = make_task
+
+    def recording_make_task(family: str, seed: int, config: GrammarConfig) -> SyntheticTask:
+        configs.append(config)
+        return real_make_task(family, seed, config)
+
+    monkeypatch.setattr("evolvets.arena.synthetic.holdout.make_task", recording_make_task)
+    for family in families:
+        holdout_tasks(name, family, 1)
+    assert len(configs) == len(families)
+    assert all(config is SCAN_PRESETS[base].config for config in configs)
 
 
 def test_holdout_series_id_carries_the_index_start() -> None:
     assert holdout_series_id("sudden", 0) == "sudden/1000"
     assert holdout_series_id("mixed", 49) == "mixed/1049"
-    assert _HOLDOUT_WIDTH == 1000
+    assert HOLDOUT_INDEX_START == 1000
+    assert HOLDOUT_INDEX_STOP == 2000
 
 
 # --- Test 5: the scan datasets are unchanged ------------------------------------------------------
 
 
 def test_the_scan_presets_and_their_seed_rule_are_unchanged() -> None:
-    """The TASK_015 golden seed still holds, so the scan seed domain is untouched."""
+    """The TASK_015 golden seed and preset digests still hold, so the scan domain is untouched."""
     assert tuple(SCAN_PRESETS) == SCAN_DATASETS
     assert scan_world_seed("synthetic-shift1", "sudden", 0) == GOLDEN_SHIFT1_SUDDEN_0
+    assert {name: preset_sha256(p) for name, p in SCAN_PRESETS.items()} == GOLDEN_SCAN_PRESET_SHA256
 
 
 def test_a_scan_per_family_reaching_the_holdout_range_is_refused(tmp_path: Path) -> None:

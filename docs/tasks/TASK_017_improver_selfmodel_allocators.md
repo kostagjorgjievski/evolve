@@ -1,4 +1,4 @@
-Status: active
+Status: done (PR A split by the size rule into A1 #155 and A2 #156; PR B as #157; PR C as #160, which closes the task)
 
 # Task 017: the improver harness, the self-model and the allocators (Phase 1 c-e)
 

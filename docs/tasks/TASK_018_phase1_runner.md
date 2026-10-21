@@ -98,9 +98,11 @@ entry 20's report reads.
   recorded client. Conventional Commits.
 - No edits under `arena/`, `ledger/`, `cache/`, `updater/`, `selfmodel/`,
   `allocator/` (PRs B and D add to `improver/` only; PR D also rewords one
-  comment in `tests/runner/test_phase1.py` — text only, no assertions),
-  none under `.github/` (the launcher is **W12**, owner-applied, below),
-  none to `.importlinter`.
+  comment in `tests/runner/test_phase1.py` — text only, no assertions —
+  and wraps the expected values in two `tests/improver/test_propose.py`
+  replay tests in one-element lists, the value-shape edit its test 10
+  allows and nothing else), none under `.github/` (the launcher is
+  **W12**, owner-applied, below), none to `.importlinter`.
 - Python 3.11 stdlib only in the new modules: `subprocess`, `resource`,
   `os`, `signal` for the evaluator; no new dependency of any weight.
 - Tests in `tests/runner/` (new: `test_phase1_eval.py`, `test_phase1.py`,
@@ -645,13 +647,14 @@ error, never a silent reuse. Lands after PR C, before W12 is dispatched.
   - `RecordedLLMClient.__init__(responses: Mapping[str, Sequence[LLMResponse
     | RecordedLLMFailure]])` — copies every key's sequence into its own
     deque, so the caller's structures are never mutated;
-  - `RecordedLLMClient.complete` — pops the key's front outcome: an empty
-    queue raises `RecordedRepliesExhausted` naming the key's SHA-256; a
-    popped `RecordedLLMFailure` raises its recorded `LLMClientError`
-    message and leaves `last_call` `None`; a popped response sets the
-    zero-cost `last_call` and returns, exactly as today. An **unknown** key
-    keeps today's `LLMClientError` naming the key's SHA-256 (TASK_017
-    test 22 is pinned, unchanged).
+  - `RecordedLLMClient.complete` — sets `last_call` to `None` on entry,
+    then pops the key's front outcome: an empty queue raises
+    `RecordedRepliesExhausted` naming the key's SHA-256; a popped
+    `RecordedLLMFailure` raises its recorded `LLMClientError` message
+    and leaves `last_call` `None`; a popped response sets the zero-cost
+    `last_call` and returns, exactly as today. An **unknown** key keeps
+    today's `LLMClientError` naming the key's SHA-256 (TASK_017 test 22
+    is pinned, unchanged).
 - `improver/propose.py`: `recorded_responses(blobs, records) ->
   dict[str, list[LLMResponse | RecordedLLMFailure]]` — appends each call's
   outcome to its key's list, in ledger record order and, within a
@@ -712,7 +715,9 @@ error, never a silent reuse. Lands after PR C, before W12 is dispatched.
 7. propose: `recorded_responses` keeps duplicates per key in call order —
    three proposals sharing one prompt (same parent, same observation) with
    three distinct replies map that key to exactly the three outcomes in
-   order, and a repair prompt stays its own key.
+   order, a key whose calls were failure-then-success maps to exactly
+   `[RecordedLLMFailure(...), LLMResponse(...)]` in that order, and a
+   repair prompt stays its own key.
 8. propose, end to end (the owner's first named test): the same three
    proposals re-run through `RecordedLLMClient(recorded_responses(...))`
    reproduce each reply's child source and diagnosis (reply *i* → child
@@ -722,8 +727,17 @@ error, never a silent reuse. Lands after PR C, before W12 is dispatched.
    appends no `proposal` record — no fallback no-op is fabricated.
 10. regression: TASK_017's replay tests (successful, failed-call,
     weights-track) and TASK_018's runner replay tests 18–19 stay green
-    with no assertion edits (identical replies replay identically in
-    order).
+    (identical replies replay identically in order). Two of the named
+    TASK_017 tests assert on the value of `recorded_responses` —
+    `test_replay_of_a_failed_proposal_reproduces_the_fallback_for_free`
+    and `test_propose_and_record_system_prompt_default_and_weights`, both
+    in `tests/improver/test_propose.py` — and under the new return type
+    those values are one-element lists. The only edits allowed there are
+    mechanical: wrap each expected value in a one-element list
+    (`== [LLMResponse(...)]`, `== [RecordedLLMFailure(...)]`), changing
+    nothing else about what the tests check. The successful-replay test,
+    the runner replay tests 18–19 and TASK_017 test 22 stay green with
+    no assertion edits at all.
 
 ### Dependencies
 

@@ -1,10 +1,14 @@
 """Phase 1 report data: read the pilot's named runs, refuse, build the rows.
 
-TASK_019 PR A, split by the size rule: this half reads the named lineage,
-replay and holdout runs, classifies them, refuses everything that would make
-the report unfaithful, and recomputes the per-condition counts, scores and
-budget sums the summary must reproduce. The bootstrap, calibration and
-inheritance numbers land in the follow-up PR against the same builder.
+TASK_019 PR A, split by the size rule: the reading half (merged as the
+``feat/phase1-report-read`` branch) reads the named lineage, replay and
+holdout runs, classifies them, refuses everything that would make the report
+unfaithful, and recomputes the per-condition counts, scores and budget sums
+the summary must reproduce. This half, ``feat/phase1-report-numbers``, adds
+the numbers that need pairing across records: the series-bootstrap gain
+interval of every condition, the self-model calibration over predictions
+paired with evaluations, and the safe-inheritance chain over each holdout's
+rows.
 
 The report reads ledgers only: no cache root, no data root, no foundation
 root, no process, no LLM. Every refusal is a :class:`Phase1ReportError`
@@ -18,7 +22,9 @@ their reason and contribute nothing else (AGENTS.md 2.8: every run that
 started is in the report).
 
 Counts and token sums are ints; wall seconds accumulate left to right, as
-everywhere in the arena.
+everywhere in the arena. The bootstrap is ``_gap_rows``'s, seeded afresh per
+condition from the one ``bootstrap_seed``, so the same ledger and seed give
+bit-identical data.
 """
 
 from __future__ import annotations
@@ -31,10 +37,26 @@ from pathlib import Path
 from typing import Any
 
 from evolvets.ledger.blobs import BlobError, BlobStore
-from evolvets.ledger.payloads import Acceptance, Baseline, Evaluation, Proposal, RunEnd, RunStart
+from evolvets.ledger.payloads import (
+    Acceptance,
+    Baseline,
+    Evaluation,
+    Prediction,
+    Proposal,
+    RunEnd,
+    RunStart,
+)
 from evolvets.ledger.schema import Record
 from evolvets.ledger.store import LedgerCorruptError, LedgerReader
-from evolvets.runner.gate1_report_data import _obj_dict, _obj_float, _obj_str, _obj_str_list
+from evolvets.runner.gate1_report_data import (
+    GapRow,
+    _gap_rows,
+    _loop_mean,
+    _obj_dict,
+    _obj_float,
+    _obj_str,
+    _obj_str_list,
+)
 from evolvets.runner.phase1 import CONDITIONS
 
 #: The prefix every Phase 1 run's condition carries.
@@ -71,7 +93,9 @@ class ConditionRow:
     ``gain_per_million_tokens`` is ``None`` when the token sum is 0
     (``random_param`` proposes without tokens); ``evaluations_charged`` is
     the ledger ``budget_spent`` evaluations, baseline included, so it is one
-    more than the ``evaluations`` count.
+    more than the ``evaluations`` count; ``gain_interval`` is the series
+    bootstrap over the baseline's and the final artifact's per-series MASE,
+    ``None`` under two series.
     """
 
     condition: str
@@ -93,6 +117,7 @@ class ConditionRow:
     gain_per_evaluation: float
     gain_per_million_tokens: float | None  # None when the token sum is 0
     gain_per_wall_hour: float
+    gain_interval: GapRow | None  # series bootstrap; None under two series
 
 
 @dataclass(frozen=True)
@@ -110,6 +135,56 @@ class ReplayAudit:
 
 
 @dataclass(frozen=True)
+class CalibrationRow:
+    """One condition's self-model calibration, over its measurable proposals.
+
+    A proposal is measurable when a prediction record and an ``ok``
+    evaluation both pair with it; proposals evaluated ``failed``,
+    ``timeout`` or ``invalid_weights``, and proposals the allocator never
+    chose, are counted in their own columns and excluded from every average
+    — the allocator's choices shape what is measurable. A condition with no
+    proposals has zeros everywhere and ``None`` everywhere an average would
+    divide by zero.
+    """
+
+    condition: str
+    predictions: int
+    realized: int  # ok evaluations paired with a prediction
+    not_ok_evaluated: int
+    never_evaluated: int
+    coverage_90: float | None  # inside [q05, q95]; None when realized == 0
+    coverage_50: float | None  # inside [q25, q75]
+    mean_q50: float | None
+    mean_gain: float | None
+    mean_q50_error: float | None  # loop mean of q50 - realized
+
+
+@dataclass(frozen=True)
+class InheritanceRow:
+    """One condition's safe-inheritance chain, over its holdout run's rows.
+
+    Accepted edit *i* hurt when its holdout MASE exceeds its predecessor's
+    (``start`` for *i* = 1); an accepted edit whose row or whose
+    predecessor's row is not ``ok`` is unjudgeable, counted and excluded.
+    The rate is a share of accepted edits, never of evaluations; a lineage
+    that accepted nothing has ``judged = 0`` and rate ``None``.
+    """
+
+    condition: str
+    lineage_run_id: str
+    holdout_run_id: str
+    accepted: int
+    judged: int
+    hurt: int
+    safe_rate: float | None  # hurt / judged; None when judged == 0
+    unjudgeable: int
+    not_ok_rows: int  # holdout rows whose status is not ok
+    start_holdout_mase: float | None
+    final_holdout_mase: float | None
+    holdout_gain: float | None  # start - final; None unless both are ok
+
+
+@dataclass(frozen=True)
 class Phase1ReportData:
     """Every number the Phase 1 pilot report shows, computed from the ledger alone."""
 
@@ -119,6 +194,8 @@ class Phase1ReportData:
     seed: int
     git_commits: tuple[str, ...]  # distinct run_start commits, sorted
     rows: tuple[ConditionRow, ...]  # CONDITIONS registry order
+    calibration: tuple[CalibrationRow, ...]  # same conditions, same order
+    inheritance: tuple[InheritanceRow, ...]  # conditions with a holdout run
     missing_holdout: tuple[str, ...]  # conditions without one, registry order
     replay: ReplayAudit | None
     distinct_forecast_start_mase: tuple[float, ...]  # across forecast-v2 rows
@@ -665,6 +742,223 @@ def _cross_check_summary(run: _NamedRun, numbers: _LineageNumbers) -> None:
             )
 
 
+# --- the series bootstrap of Definition 2 ---------------------------------------------------------
+
+
+def _final_scored_record(records: Sequence[Record]) -> Record:
+    """The record the bootstrap pairs with the baseline.
+
+    The final accepted artifact's evaluation record; the baseline itself
+    when the lineage accepted nothing, for its starting artifact is then
+    also its final one (all-zero differences).
+    """
+    by_id = {record.record_id: record for record in records}
+    final: Record | None = None
+    for record in records:
+        payload = record.payload
+        if record.kind == "acceptance" and isinstance(payload, Acceptance) and payload.accepted:
+            final = by_id.get(record.refers_to[1])
+    return records[1] if final is None else final  # the baseline sits at index 1
+
+
+def _gain_interval(
+    blobs: BlobStore, run: _NamedRun, condition: str, bootstrap_seed: int
+) -> GapRow | None:
+    """One condition's series-resampling interval over its per-series gains.
+
+    The baseline's and the final artifact's per-series MASE pair by
+    ``series_id``, equal ids in equal order, one fresh
+    ``_gap_rows`` table (hence one fresh generator) per condition; under
+    two series there is no interval to draw.
+    """
+    where = f"run {run.run_id}"
+    baseline = run.records[1]
+    final = _final_scored_record(run.records)
+    start = _series_of(blobs, run.run_id, baseline)
+    finish = _series_of(blobs, run.run_id, final)
+    if start is None or finish is None:
+        raise Phase1ReportError(
+            f"{where}: record {final.record_id}, the final artifact's score, is not ok; "
+            "there are no series to bootstrap"
+        )
+    start_ids = tuple(score.series_id for score in start)
+    final_ids = tuple(score.series_id for score in finish)
+    if start_ids != final_ids:
+        raise Phase1ReportError(
+            f"{where}: the series ids differ between the baseline and record "
+            f"{final.record_id}, the final artifact's score: {start_ids} vs {final_ids}"
+        )
+    differences = [a.mase - b.mase for a, b in zip(start, finish, strict=True)]
+    if len(differences) < 2:
+        return None
+    return _gap_rows([(condition, differences)], bootstrap_seed)[0]
+
+
+# --- the calibration of Definition 3 --------------------------------------------------------------
+
+
+def _calibration_row(run: _NamedRun, condition: str) -> CalibrationRow:
+    """One condition's calibration: quantiles paired with realized gains.
+
+    The realized gain of a proposal is its parent's measured dev MASE at
+    proposal time — the running accepted value, the quantity the engine's
+    fit history stores — minus the child's evaluation MASE; only proposals
+    with both a prediction and an ``ok`` evaluation are measurable, and the
+    averages never see another proposal.
+    """
+    records = run.records
+    where = f"run {run.run_id}"
+    baseline = records[1].payload
+    if not isinstance(baseline, Baseline):
+        raise Phase1ReportError(f"{where}: the baseline record carries no baseline payload")
+    running = _finite(baseline.metrics.get("mase"), f"{where}: the baseline metrics mase")
+    prediction_of: dict[str, Record] = {}
+    evaluation_of: dict[str, Record] = {}
+    parent_of: dict[str, float] = {}
+    proposals: list[str] = []
+    predictions = 0
+    by_id = {record.record_id: record for record in records}
+    for record in records:
+        if record.kind == "proposal":
+            proposals.append(record.record_id)
+            parent_of[record.record_id] = running
+        elif record.kind == "prediction":
+            predictions += 1
+            prediction_of.setdefault(record.refers_to[0], record)
+        elif record.kind == "evaluation":
+            evaluation_of.setdefault(record.refers_to[0], record)
+        elif record.kind == "acceptance":
+            payload = record.payload
+            if isinstance(payload, Acceptance) and payload.accepted:
+                evaluation = by_id.get(record.refers_to[1])
+                scored = evaluation.payload if evaluation is not None else None
+                if evaluation is None or not isinstance(scored, Evaluation):
+                    raise Phase1ReportError(
+                        f"{where} record {record.record_id}: an acceptance must refer "
+                        "to its evaluation record second"
+                    )
+                running = _finite(
+                    scored.metrics.get("mase"),
+                    f"{where} record {evaluation.record_id}: the accepted mase",
+                )
+    gains: list[float] = []
+    q50s: list[float] = []
+    errors: list[float] = []
+    inside_90 = 0
+    inside_50 = 0
+    not_ok_evaluated = 0
+    never_evaluated = 0
+    for proposal_id in proposals:
+        prediction = prediction_of.get(proposal_id)
+        if prediction is None:
+            continue  # nothing predicted, nothing measurable
+        predicted = prediction.payload
+        if not isinstance(predicted, Prediction):
+            raise Phase1ReportError(
+                f"{where} record {prediction.record_id}: a prediction record "
+                "carries no prediction payload"
+            )
+        quantiles = predicted.quantiles
+        evaluation = evaluation_of.get(proposal_id)
+        if evaluation is None:
+            never_evaluated += 1
+            continue
+        scored = evaluation.payload
+        if not isinstance(scored, Evaluation):
+            raise Phase1ReportError(
+                f"{where} record {evaluation.record_id}: an evaluation record "
+                "carries no evaluation payload"
+            )
+        if scored.status != "ok":
+            not_ok_evaluated += 1
+            continue
+        gain = parent_of[proposal_id] - _finite(
+            scored.metrics.get("mase"), f"{where} record {evaluation.record_id}: the evaluated mase"
+        )
+        gains.append(gain)
+        q50s.append(quantiles["q50"])
+        errors.append(quantiles["q50"] - gain)
+        if quantiles["q05"] <= gain <= quantiles["q95"]:
+            inside_90 += 1
+        if quantiles["q25"] <= gain <= quantiles["q75"]:
+            inside_50 += 1
+    realized = len(gains)
+    return CalibrationRow(
+        condition=condition,
+        predictions=predictions,
+        realized=realized,
+        not_ok_evaluated=not_ok_evaluated,
+        never_evaluated=never_evaluated,
+        coverage_90=None if realized == 0 else inside_90 / realized,
+        coverage_50=None if realized == 0 else inside_50 / realized,
+        mean_q50=None if realized == 0 else _loop_mean(q50s),
+        mean_gain=None if realized == 0 else _loop_mean(gains),
+        mean_q50_error=None if realized == 0 else _loop_mean(errors),
+    )
+
+
+# --- the safe inheritance of Definition 4 ---------------------------------------------------------
+
+
+def _inheritance_row(
+    condition: str, lineage: _NamedRun, holdout: _NamedRun, accepted: int
+) -> InheritanceRow:
+    """One condition's safe-inheritance chain over its holdout run's rows.
+
+    The rows are ``start``, ``accept-01``, … in ledger order, their shape
+    already checked against the lineage's acceptances; a not-``ok`` row on
+    either side of an accepted edit makes the pair unjudgeable.
+    """
+    pair = f"holdout {holdout.run_id!r} of lineage {lineage.run_id!r}"
+    rows = [record for record in holdout.records if record.kind == "baseline"]
+    if len(rows) != accepted + 1:
+        raise Phase1ReportError(
+            f"{pair}: the holdout rows are {len(rows)} for {accepted} accepted edit(s)"
+        )
+    mase: list[float | None] = []
+    for record in rows:
+        payload = record.payload
+        if not isinstance(payload, Baseline):
+            raise Phase1ReportError(
+                f"run {holdout.run_id} record {record.record_id}: no baseline payload"
+            )
+        if payload.status != "ok":
+            mase.append(None)  # unjudgeable whichever side of a pair it sits on
+        else:
+            mase.append(
+                _finite(
+                    payload.metrics.get("mase"),
+                    f"run {holdout.run_id} record {record.record_id}: the holdout mase",
+                )
+            )
+    judged = 0
+    hurt = 0
+    unjudgeable = 0
+    for index in range(1, accepted + 1):
+        current, previous = mase[index], mase[index - 1]
+        if current is None or previous is None:
+            unjudgeable += 1
+            continue
+        judged += 1
+        if current > previous:
+            hurt += 1
+    start, final = mase[0], mase[accepted]
+    return InheritanceRow(
+        condition=condition,
+        lineage_run_id=lineage.run_id,
+        holdout_run_id=holdout.run_id,
+        accepted=accepted,
+        judged=judged,
+        hurt=hurt,
+        safe_rate=None if judged == 0 else hurt / judged,
+        unjudgeable=unjudgeable,
+        not_ok_rows=sum(1 for value in mase if value is None),
+        start_holdout_mase=start,
+        final_holdout_mase=final,
+        holdout_gain=None if start is None or final is None else start - final,
+    )
+
+
 # --- the entry point ------------------------------------------------------------------------------
 
 
@@ -674,10 +968,9 @@ def build_phase1_report_data(
     """Read the named runs and compute the report's data from the ledger alone.
 
     Raises :class:`Phase1ReportError` on every refusal the report's rules
-    define; ``bootstrap_seed`` seeds the series bootstrap, which the
-    follow-up PR of this task adds.
+    define; ``bootstrap_seed`` seeds the series bootstrap, one fresh
+    generator per condition.
     """
-    del bootstrap_seed  # the bootstrap lands with the numbers PR of TASK_019 PR A
     root = Path(ledger_root)
     if not run_ids:
         raise Phase1ReportError("at least one run id is required")
@@ -787,9 +1080,12 @@ def build_phase1_report_data(
     for run in tabled_lineages:
         _cross_check_summary(run, numbers[run.run_id])
 
-    # the rows, in CONDITIONS registry order over the tabled conditions
+    # the rows, in CONDITIONS registry order over the tabled conditions, each
+    # with its series bootstrap, its calibration row beside it in the same order
     row_of = {run.condition: run for run in row_sources}
+    blobs_of = {run.run_id: BlobStore(root / run.run_id / "blobs") for run in row_sources}
     rows: list[ConditionRow] = []
+    calibration: list[CalibrationRow] = []
     for condition, spec in CONDITIONS.items():
         row_source = row_of.get(condition)
         if row_source is None:
@@ -801,6 +1097,13 @@ def build_phase1_report_data(
             counted.evaluations_charged,
             f"run {row_source.run_id}: the charged evaluations",
         )
+        if counted.wall_seconds <= 0.0:
+            # real runs always spend wall time; a zero sum is a degenerate
+            # ledger the spelled division cannot run on
+            raise Phase1ReportError(
+                f"run {row_source.run_id}: the records sum zero wall seconds; "
+                "a gain per wall hour cannot divide by them"
+            )
         rows.append(
             ConditionRow(
                 condition=condition,
@@ -822,8 +1125,12 @@ def build_phase1_report_data(
                 gain_per_evaluation=gain / counted.evaluations_charged,
                 gain_per_million_tokens=None if tokens == 0 else gain * 1_000_000.0 / tokens,
                 gain_per_wall_hour=gain * 3600.0 / counted.wall_seconds,
+                gain_interval=_gain_interval(
+                    blobs_of[row_source.run_id], row_source, condition, bootstrap_seed
+                ),
             )
         )
+        calibration.append(_calibration_row(row_source, condition))
 
     # the replay's audit row, copied from its run_end
     audit: ReplayAudit | None = None
@@ -865,6 +1172,19 @@ def build_phase1_report_data(
         if row.starting_mase not in distinct:
             distinct.append(row.starting_mase)
     missing_holdout = tuple(row.condition for row in rows if row.run_id not in holdouts_of)
+    # the safe-inheritance chain, over the tabled holdouts of the tabled
+    # lineages; a holdout that is named but not tabled is listed untabled and
+    # feeds nothing else, so its condition carries no row here
+    inheritance = [
+        _inheritance_row(
+            row.condition,
+            row_of[row.condition],
+            holdouts_of[row.run_id],
+            numbers[row.run_id].accepted,
+        )
+        for row in rows
+        if holdouts_of.get(row.run_id) is not None and _tabled(holdouts_of[row.run_id])
+    ]
     return Phase1ReportData(
         dataset=dataset,
         pool_spec=pool_spec,
@@ -872,6 +1192,8 @@ def build_phase1_report_data(
         seed=head.start.seed,
         git_commits=tuple(sorted({run.start.git_commit for run in runs})),
         rows=tuple(rows),
+        calibration=tuple(calibration),
+        inheritance=tuple(inheritance),
         missing_holdout=missing_holdout,
         replay=audit,
         distinct_forecast_start_mase=tuple(distinct),

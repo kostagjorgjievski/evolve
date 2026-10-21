@@ -1,13 +1,15 @@
-"""The Phase 1 report's reading half (TASK_019 PR A: tests 1, 2, 9, 10-16).
+"""The Phase 1 report's builder (TASK_019 PR A, split by the size rule).
 
-The module fixture builds one small pilot ledger once — five conditions'
-lineages over the shift3 fixture pool, each with its holdout run, one replay
-of the treatment and one aborted lineage, every evaluation stubbed exactly as
-``test_phase1`` stubs them (its ok outcomes carry the per-series detail the
-real evaluator reports) — and every test then reads that ledger through
-``build_phase1_report_data`` alone. Refusals run on hand-built copies of a
-fixture run: the copy helper preserves record ids, references and blobs, so
-the one edited thing is the only thing that differs.
+The reading branch carried tests 1, 2, 9 and 10-16; this file's numbers
+branch adds tests 3-8 and 17. The module fixture builds one small pilot
+ledger once — five conditions' lineages over the shift3 fixture pool, each
+with its holdout run, one replay of the treatment and one aborted lineage,
+every evaluation stubbed exactly as ``test_phase1`` stubs them (its ok
+outcomes carry the per-series detail the real evaluator reports) — and
+every test then reads that ledger through ``build_phase1_report_data``
+alone. Refusals run on hand-built copies of a fixture run: the copy helper
+preserves record ids, references and blobs, so the one edited thing is the
+only thing that differs.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import ast
 import contextlib
 import json
 import os
+import random
 import shutil
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -37,12 +40,22 @@ from evolvets.improver.artifacts import (
 from evolvets.improver.interfaces import LLMResponse
 from evolvets.ledger.blobs import BlobStore
 from evolvets.ledger.canonical import canonical_bytes, canonical_json
-from evolvets.ledger.payloads import Baseline, Payload, RunEnd, RunStart
-from evolvets.ledger.schema import ZERO_HASH, Record, make_record
+from evolvets.ledger.payloads import (
+    Acceptance,
+    Baseline,
+    Evaluation,
+    Payload,
+    Prediction,
+    RunEnd,
+    RunStart,
+)
+from evolvets.ledger.schema import ZERO_HASH, Budget, Record, make_record
 from evolvets.ledger.store import LedgerReader
 from evolvets.runner import phase1, phase1_holdout, phase1_report_data
+from evolvets.runner.gate1_report_data import GapRow
 from evolvets.runner.phase1_eval import EvalOutcome
 from evolvets.runner.phase1_report_data import (
+    CalibrationRow,
     Phase1ReportError,
     build_phase1_report_data,
 )
@@ -57,7 +70,7 @@ from tests.runner.test_phase1 import (
     lineage_spec,
     reply,
 )
-from tests.runner.test_phase1_holdout import holdout_run
+from tests.runner.test_phase1_holdout import WEIGHTS_FLAT_CHILD, holdout_run
 
 #: The holdout every lineage scores: shift3's replicate.
 HOLDOUT = "synthetic-shift3-holdout"
@@ -123,14 +136,16 @@ def _patched_lineage(
 
 
 @contextlib.contextmanager
-def _patched_holdout(default: EvalOutcome) -> Any:
-    """The holdout's seams patched: git commit stubbed, every score the default."""
+def _patched_holdout(
+    default: EvalOutcome, outcomes: Mapping[str, EvalOutcome] | None = None
+) -> Any:
+    """The holdout's seams patched: git commit stubbed, scores stubbed per source."""
     with ExitStack() as stack:
         stack.enter_context(
             patch.object(phase1_holdout, "current_git_commit", lambda repo: "0" * 40)
         )
         stack.enter_context(
-            patch.object(phase1_holdout, "evaluate_source", StubEvaluator({}, default))
+            patch.object(phase1_holdout, "evaluate_source", StubEvaluator(outcomes or {}, default))
         )
         yield
 
@@ -279,7 +294,9 @@ def pilot(tmp_path_factory: pytest.TempPathFactory) -> Pilot:
     )
     made.lineages["random_param"] = "lineage-random-param"
     _holdout(made, "random_param")
-    # the weights-space ablation: one accepted rows edit under weights-v1
+    # the weights-space ablation: one accepted rows edit under weights-v1,
+    # from the weights reference's own starting MASE (not the forecast
+    # reference's 1.0 — its gain is measured against its own condition's start)
     assert (
         _lineage(
             made,
@@ -288,7 +305,7 @@ def pilot(tmp_path_factory: pytest.TempPathFactory) -> Pilot:
             spec={"proposals_per_generation": 1},
             responses=[reply(WEIGHTS_CHILD)] * 3,
             outcomes={
-                WEIGHTS_REFERENCE_ARTIFACT_SOURCE: scored(1.0),
+                WEIGHTS_REFERENCE_ARTIFACT_SOURCE: scored(1.2),
                 WEIGHTS_CHILD: scored(0.8),
             },
         )
@@ -377,6 +394,7 @@ def copy_run(
     keep_run_end: bool = True,
     drop_kinds: Sequence[str] = (),
     repeat_baseline: bool = False,
+    budget_of: Callable[[Record], Budget] | None = None,
     mutate: Callable[[Record, Payload, list[str], BlobStore], tuple[Payload, list[str]]]
     | None = None,
 ) -> None:
@@ -386,7 +404,8 @@ def copy_run(
     timestamps, so every ``refers_to`` and every blob linkage still holds and
     the copy verifies; exactly the named edit differs. ``mutate`` sees every
     record's payload and references with the copy's blob store, for edits
-    that need new blobs.
+    that need new blobs; ``budget_of`` maps every record's budget, for edits
+    of the charged compute.
     """
     run_dir = Path(ledger_root) / new_id
     if run_dir.exists():
@@ -430,7 +449,7 @@ def copy_run(
             kind=record.kind,
             payload=payload,
             refers_to=refers_to,
-            budget=record.budget,
+            budget=record.budget if budget_of is None else budget_of(record),
             created_at=record.created_at,
             record_id=record.record_id,
         )
@@ -446,7 +465,7 @@ def copy_run(
                 kind=record.kind,
                 payload=payload,
                 refers_to=refers_to,
-                budget=record.budget,
+                budget=record.budget if budget_of is None else budget_of(record),
                 created_at=record.created_at,  # a fresh record_id: a second baseline
             )
             lines[record.stream].append(canonical_json(duplicate.to_dict()) + "\n")
@@ -931,3 +950,459 @@ def test_the_module_names_no_engine_package() -> None:
         for name in names
         if name in forbidden or any(name.startswith(f + ".") for f in forbidden)
     ]
+
+
+# --- Tests 3-8 and 17: the numbers (feat/phase1-report-numbers) -----------------------------------
+
+
+def scored_series(pooled: float, per_series: Sequence[float], series: Sequence[str]) -> EvalOutcome:
+    """An ok outcome with a pooled MASE and distinct per-series MASE values."""
+    return EvalOutcome(
+        status="ok",
+        result_obj={
+            "metrics": {"mase": pooled},
+            "series": [
+                {"series_id": series_id, "mase": mase}
+                for series_id, mase in zip(series, per_series, strict=True)
+            ],
+        },
+        series_wall_seconds=(0.01,) * len(series),
+        error=None,
+        wall_seconds=0.05,
+    )
+
+
+def _bounds(differences: Sequence[float], seed: int) -> tuple[float, float]:
+    """One condition's interval, recomputed independently of the builder.
+
+    A fresh ``random.Random(seed)`` per condition is exactly what the
+    builder's one-row ``_gap_rows`` table draws, so the bounds must agree
+    draw for draw.
+    """
+    rng = random.Random(seed)
+    means: list[float] = []
+    for _resample in range(2000):
+        total = 0.0
+        for _draw in range(len(differences)):
+            total = total + differences[rng.randrange(len(differences))]
+        means.append(total / len(differences))
+    means.sort()
+    return means[50], means[1949]
+
+
+def _loop_mean(values: Sequence[float]) -> float:
+    """The left-to-right loop mean, recomputed independently."""
+    total = 0.0
+    for value in values:
+        total = total + value
+    return total / len(values)
+
+
+# --- Test 3: the per-compute columns --------------------------------------------------------------
+
+
+def test_per_compute_columns_divide_exactly_as_spelled(pilot: Pilot) -> None:
+    """Every per-compute column equals its spelled division over the record sums."""
+    data = _report(pilot, _ids(pilot))
+    for row in data.rows:
+        assert row.gain == row.starting_mase - row.best_mase
+        assert row.gain_per_evaluation == row.gain / row.evaluations_charged
+        tokens = row.input_tokens + row.output_tokens
+        if tokens == 0:
+            assert row.gain_per_million_tokens is None
+        else:
+            assert row.gain_per_million_tokens == row.gain * 1_000_000.0 / tokens
+        assert row.gain_per_wall_hour == row.gain * 3600.0 / row.wall_seconds
+    by_condition = {row.condition: row for row in data.rows}
+    assert by_condition["random_param"].gain_per_million_tokens is None  # no LLM tokens
+    for condition in ("predictive", "evaluate_all", "fixed", "weights_only"):
+        assert by_condition[condition].gain_per_million_tokens is not None
+
+
+def test_zero_wall_time_refuses_rather_than_dividing(pilot: Pilot) -> None:
+    """A run whose records sum zero wall seconds is refused, not divided by.
+
+    The hardening #178's review asked for: a degenerate hand-built ledger
+    must meet a named refusal, never a ``ZeroDivisionError``.
+    """
+    end = _records(pilot, "lineage-fixed")[-1].payload
+    assert isinstance(end, RunEnd)
+    spent = end.summary["budget_spent"]
+    assert isinstance(spent, dict)
+    copy_run(
+        pilot.ledger,
+        "lineage-fixed",
+        "zero-wall",
+        budget_of=lambda record: replace(record.budget, wall_seconds=0.0),
+        summary_replace={"budget_spent": {**spent, "wall_seconds": 0.0}},
+    )
+    with pytest.raises(Phase1ReportError, match=r"zero-wall.*zero wall seconds"):
+        _report(pilot, [*_ids(pilot, drop=["lineage-fixed"]), "zero-wall"])
+
+
+# --- Test 4: the series bootstrap -----------------------------------------------------------------
+
+
+def test_series_bootstrap_matches_an_independent_recomputation(pilot: Pilot) -> None:
+    """The interval equals a fresh-seeded independent draw over the per-series gains."""
+    series = (
+        "synthetic-shift3/shift/0001",
+        "synthetic-shift3/shift/0002",
+        "synthetic-shift3/shift/0003",
+    )
+    assert (
+        _lineage(
+            pilot,
+            "lineage-series",
+            "predictive",
+            spec={"proposals_per_generation": 1},
+            responses=[reply(CHILD_A), reply(CHILD_B), reply(CHILD_B)],
+            outcomes={
+                REFERENCE_ARTIFACT_SOURCE: scored_series(1.0, (0.8, 1.2, 1.1), series),
+                CHILD_A: scored_series(0.9, (0.5, 1.1, 0.9), series),
+            },
+        )
+        == 0
+    )
+    row = _report(pilot, ["lineage-series"]).rows[0]
+    differences = [0.8 - 0.5, 1.2 - 1.1, 1.1 - 0.9]
+    assert row.gain_interval is not None
+    assert row.gain_interval.label == "predictive"
+    assert row.gain_interval.mean == _loop_mean(differences)
+    assert (row.gain_interval.lower, row.gain_interval.upper) == _bounds(differences, 0)
+
+
+def test_no_acceptance_bootstraps_zero_and_one_series_gives_none(pilot: Pilot) -> None:
+    """A lineage that accepted nothing has all-zero differences; one series has no interval."""
+    data = _report(pilot, _ids(pilot))
+    by_condition = {row.condition: row for row in data.rows}
+    for condition in ("evaluate_all", "fixed", "random_param"):
+        assert by_condition[condition].gain_interval == GapRow(
+            label=condition, mean=0.0, lower=0.0, upper=0.0
+        )
+    # the accepting conditions: the baseline paired with the final accepted edit
+    assert by_condition["predictive"].gain_interval == GapRow(
+        label="predictive", mean=1.0 - 0.7, lower=1.0 - 0.7, upper=1.0 - 0.7
+    )
+    assert by_condition["weights_only"].gain_interval == GapRow(
+        label="weights_only", mean=1.2 - 0.8, lower=1.2 - 0.8, upper=1.2 - 0.8
+    )
+    solo = (PILOT_SERIES[0],)
+    assert (
+        _lineage(
+            pilot,
+            "lineage-one-series",
+            "predictive",
+            spec={"proposals_per_generation": 1},
+            responses=[reply(CHILD_B)] * 3,
+            outcomes={
+                REFERENCE_ARTIFACT_SOURCE: scored(1.0, solo),
+                CHILD_B: scored(0.7, solo),
+            },
+        )
+        == 0
+    )
+    assert _report(pilot, ["lineage-one-series"]).rows[0].gain_interval is None
+
+
+def test_mismatched_series_ids_between_baseline_and_final_refuse(pilot: Pilot) -> None:
+    """A final evaluation whose series ids are not the baseline's refuses the report."""
+    base_ids = _ids(pilot, drop=["lineage-predictive"])
+    records = _records(pilot, "lineage-predictive")
+    by_id = {record.record_id: record for record in records}
+    final = [
+        by_id[record.refers_to[1]]
+        for record in records
+        if record.kind == "acceptance"
+        and isinstance(record.payload, Acceptance)
+        and record.payload.accepted
+    ][-1]
+
+    def rename(
+        record: Record, payload: Payload, refers_to: list[str], blobs: BlobStore
+    ) -> tuple[Payload, list[str]]:
+        if record.record_id == final.record_id and isinstance(payload, Evaluation):
+            assert payload.per_task_blob is not None
+            blob = json.loads(blobs.get(payload.per_task_blob).decode("utf-8"))
+            blob["result"]["series"][0]["series_id"] = "synthetic-shift3/renamed/0001"
+            return (
+                replace(payload, per_task_blob=blobs.put(canonical_bytes(blob))),
+                refers_to,
+            )
+        return payload, refers_to
+
+    copy_run(pilot.ledger, "lineage-predictive", "series-mismatch", mutate=rename)
+    with pytest.raises(Phase1ReportError, match="series ids differ"):
+        _report(pilot, [*base_ids, "series-mismatch"])
+
+
+# --- Test 5: the starting values ------------------------------------------------------------------
+
+
+def test_forecast_rows_share_one_start_while_weights_differs(pilot: Pilot) -> None:
+    """The forecast-v2 rows start bit-equal; the weights row starts from its own reference."""
+    data = _report(pilot, _ids(pilot))
+    by_condition = {row.condition: row for row in data.rows}
+    forecast_starts = {row.starting_mase for row in data.rows if row.interface == "forecast-v2"}
+    assert len(forecast_starts) == 1
+    assert data.distinct_forecast_start_mase == tuple(forecast_starts)
+    weights = by_condition["weights_only"]
+    assert weights.starting_mase not in forecast_starts
+    assert weights.gain == weights.starting_mase - weights.best_mase  # against its own start
+
+
+# --- Test 6: the calibration ----------------------------------------------------------------------
+
+
+def _hand_calibration(
+    records: Sequence[Record],
+) -> tuple[list[tuple[float, float, dict[str, float]]], int, int]:
+    """Hand-counted calibration: realized (parent, child mase, quantiles), not-ok, never.
+
+    The parent is the running accepted value at the proposal record, exactly
+    as the engine's fit history stores it.
+    """
+    by_id = {record.record_id: record for record in records}
+    prediction_of: dict[str, Record] = {}
+    evaluation_of: dict[str, Record] = {}
+    parent_of: dict[str, float] = {}
+    realized: list[tuple[float, float, dict[str, float]]] = []
+    not_ok = 0
+    never = 0
+    running = 0.0
+    for record in records:
+        if record.kind == "baseline" and isinstance(record.payload, Baseline):
+            running = float(record.payload.metrics["mase"])
+        elif record.kind == "proposal":
+            parent_of[record.record_id] = running
+        elif record.kind == "prediction" and record.refers_to[0] not in prediction_of:
+            prediction_of[record.refers_to[0]] = record
+        elif record.kind == "evaluation" and record.refers_to[0] not in evaluation_of:
+            evaluation_of[record.refers_to[0]] = record
+        elif (
+            record.kind == "acceptance"
+            and isinstance(record.payload, Acceptance)
+            and record.payload.accepted
+        ):
+            evaluation = by_id[record.refers_to[1]]
+            assert isinstance(evaluation.payload, Evaluation)
+            running = float(evaluation.payload.metrics["mase"])
+    for proposal_id, parent in parent_of.items():
+        if proposal_id not in prediction_of:
+            continue  # nothing predicted, nothing measurable
+        evaluation = evaluation_of.get(proposal_id)
+        if evaluation is None:
+            never += 1
+        elif evaluation.payload.status != "ok":
+            not_ok += 1
+        else:
+            assert isinstance(evaluation.payload, Evaluation)
+            predicted = prediction_of[proposal_id].payload
+            assert isinstance(predicted, Prediction)
+            realized.append(
+                (parent, float(evaluation.payload.metrics["mase"]), predicted.quantiles)
+            )
+    return realized, not_ok, never
+
+
+def test_calibration_counts_coverages_and_means(pilot: Pilot) -> None:
+    """Counts, coverages and means equal hand counts over the records' quantile pairs."""
+    data = _report(pilot, _ids(pilot))
+    assert [row.condition for row in data.calibration] == [row.condition for row in data.rows]
+    run_of = {row.condition: row.run_id for row in data.rows}
+    for row in data.calibration:
+        realized, not_ok, never = _hand_calibration(_records(pilot, run_of[row.condition]))
+        gains = [parent - child for parent, child, _quantiles in realized]
+        inside_90 = sum(
+            1 for parent, child, q in realized if q["q05"] <= parent - child <= q["q95"]
+        )
+        inside_50 = sum(
+            1 for parent, child, q in realized if q["q25"] <= parent - child <= q["q75"]
+        )
+        counts = _counts(pilot, run_of[row.condition])
+        assert (row.predictions, row.realized) == (counts["prediction"], len(realized))
+        assert (row.not_ok_evaluated, row.never_evaluated) == (not_ok, never)
+        assert row.coverage_90 == inside_90 / len(realized)
+        assert row.coverage_50 == inside_50 / len(realized)
+        assert row.mean_q50 == _loop_mean([q["q50"] for _p, _c, q in realized])
+        assert row.mean_gain == _loop_mean(gains)
+        assert row.mean_q50_error == _loop_mean(
+            [q["q50"] - (parent - child) for parent, child, q in realized]
+        )
+    by_condition = {row.condition: row for row in data.calibration}
+    assert by_condition["evaluate_all"].never_evaluated == 1  # the slot the budget closed on
+    assert by_condition["fixed"].never_evaluated == 3  # one unevaluated proposal per generation
+
+
+def test_a_no_proposal_lineage_calibrates_to_zeros(pilot: Pilot) -> None:
+    """A lineage that proposed nothing has zero counts and no coverages, in its own build.
+
+    Its ``llm_output_tokens`` limit is smaller than the pilot's, so the
+    equal-budget refusal would reject it next to the standard fixtures; the
+    task pins that it is reported alone.
+    """
+    assert (
+        _lineage(
+            pilot,
+            "lineage-no-proposals",
+            "predictive",
+            spec={"proposals_per_generation": 1, "llm_output_tokens": 16_383},
+            outcomes={REFERENCE_ARTIFACT_SOURCE: scored(1.0)},
+        )
+        == 0
+    )
+    data = _report(pilot, ["lineage-no-proposals"])
+    assert data.calibration == (
+        CalibrationRow(
+            condition="predictive",
+            predictions=0,
+            realized=0,
+            not_ok_evaluated=0,
+            never_evaluated=0,
+            coverage_90=None,
+            coverage_50=None,
+            mean_q50=None,
+            mean_gain=None,
+            mean_q50_error=None,
+        ),
+    )
+    # nothing accepted, so the baseline is also the final artifact: zero differences
+    assert data.rows[0].gain_interval == GapRow(label="predictive", mean=0.0, lower=0.0, upper=0.0)
+
+
+# --- Test 7: the parent at proposal time ----------------------------------------------------------
+
+
+def test_generation_two_uses_the_accepted_parent_not_the_baseline(pilot: Pilot) -> None:
+    """A generation-2 proposal's realized gain subtracts from child A's MASE, not the baseline's."""
+    realized, _not_ok, _never = _hand_calibration(_records(pilot, "lineage-predictive"))
+    gains = [parent - child for parent, child, _quantiles in realized]
+    assert gains == [1.0 - 0.8, 0.8 - 0.7, 0.7 - 0.7]
+    by_condition = {row.condition: row for row in _report(pilot, _ids(pilot)).calibration}
+    assert by_condition["predictive"].realized == 3
+    assert by_condition["predictive"].mean_gain == _loop_mean(gains)
+
+
+# --- Test 8: the safe inheritance -----------------------------------------------------------------
+
+
+def test_inheritance_chain_rule_over_the_holdout_rows(pilot: Pilot) -> None:
+    """Judged, hurt and rate follow the chain rule; no acceptance gives no rate."""
+    data = _report(pilot, _ids(pilot))
+    assert [row.condition for row in data.inheritance] == [row.condition for row in data.rows]
+    by_condition = {row.condition: row for row in data.inheritance}
+    predictive = by_condition["predictive"]
+    assert (predictive.accepted, predictive.judged, predictive.hurt) == (2, 2, 0)
+    assert predictive.safe_rate == 0.0
+    assert (predictive.unjudgeable, predictive.not_ok_rows) == (0, 0)
+    assert (predictive.start_holdout_mase, predictive.final_holdout_mase) == (1.1, 1.1)
+    assert predictive.holdout_gain == 0.0
+    weights = by_condition["weights_only"]
+    assert (weights.accepted, weights.judged, weights.hurt, weights.safe_rate) == (1, 1, 0, 0.0)
+    for condition in ("evaluate_all", "fixed", "random_param"):
+        flat = by_condition[condition]
+        assert (flat.accepted, flat.judged, flat.hurt) == (0, 0, 0)
+        assert flat.safe_rate is None
+        assert flat.holdout_gain == 0.0
+
+
+def test_a_hurt_holdout_edit_is_judged_and_counted(pilot: Pilot) -> None:
+    """A holdout edit that scored worse than its predecessor hurts; the rate is hurt/judged."""
+
+    def bump(
+        record: Record, payload: Payload, refers_to: list[str], blobs: BlobStore
+    ) -> tuple[Payload, list[str]]:
+        if (
+            record.kind == "baseline"
+            and isinstance(payload, Baseline)
+            and payload.updater_id == "accept-01"
+        ):
+            assert payload.per_task_blob is not None
+            blob = json.loads(blobs.get(payload.per_task_blob).decode("utf-8"))
+            for entry in blob["result"]["series"]:
+                entry["mase"] = 1.3
+            return (
+                replace(
+                    payload, metrics={"mase": 1.3}, per_task_blob=blobs.put(canonical_bytes(blob))
+                ),
+                refers_to,
+            )
+        return payload, refers_to
+
+    copy_run(pilot.ledger, "holdout-predictive", "holdout-hurt", mutate=bump)
+    row = _report(pilot, ["lineage-predictive", "holdout-hurt"]).inheritance[0]
+    assert (row.judged, row.hurt, row.safe_rate) == (2, 1, 0.5)
+    assert (row.start_holdout_mase, row.final_holdout_mase, row.holdout_gain) == (1.1, 1.1, 0.0)
+
+
+def test_a_not_ok_holdout_row_is_unjudgeable(pilot: Pilot) -> None:
+    """The weights flat child, accepted in dev, scores invalid_weights on the holdout."""
+    assert (
+        _lineage(
+            pilot,
+            "lineage-weights-flat",
+            "weights_only",
+            spec={"proposals_per_generation": 1},
+            responses=[reply(WEIGHTS_FLAT_CHILD)] * 3,
+            outcomes={
+                WEIGHTS_REFERENCE_ARTIFACT_SOURCE: scored(1.0),
+                WEIGHTS_FLAT_CHILD: scored(0.8),  # the dev stub accepts the flat child
+            },
+        )
+        == 0
+    )
+    invalid = EvalOutcome(
+        status="invalid_weights",
+        result_obj=None,
+        series_wall_seconds=(),
+        error="arena: weights rows must be tuples, not floats",
+        wall_seconds=0.05,
+    )
+    with _patched_holdout(
+        invalid, {WEIGHTS_REFERENCE_ARTIFACT_SOURCE: scored(1.1, HOLDOUT_SERIES)}
+    ):
+        assert (
+            holdout_run(
+                (pilot.base, pilot.base / "cache_store"),
+                pilot.base,
+                from_run="lineage-weights-flat",
+                run_id="holdout-weights-flat",
+            )
+            == 0
+        )
+    row = _report(pilot, ["lineage-weights-flat", "holdout-weights-flat"]).inheritance[0]
+    assert (row.accepted, row.judged, row.hurt, row.safe_rate) == (1, 0, 0, None)
+    assert (row.unjudgeable, row.not_ok_rows) == (1, 1)
+    assert row.start_holdout_mase == 1.1
+    assert row.final_holdout_mase is None
+    assert row.holdout_gain is None
+
+
+def test_missing_and_untabled_holdouts_add_no_row(pilot: Pilot) -> None:
+    """A condition without a named holdout is named as missing and adds no row.
+
+    A holdout that is named but not tabled — the explicit decision for the
+    reviewer's note on #178 — is listed untabled, feeds no inheritance row,
+    and its condition is not "missing": the run exists, and the untabled
+    list says why it fed nothing.
+    """
+    data = _report(pilot, _ids(pilot, drop=["holdout-fixed"]))
+    assert "fixed" not in [row.condition for row in data.inheritance]
+    assert data.missing_holdout == ("fixed",)
+    copy_run(pilot.ledger, "holdout-predictive", "holdout-aborted", keep_run_end=False)
+    data = _report(pilot, ["lineage-predictive", "holdout-aborted"])
+    assert data.inheritance == ()
+    assert data.missing_holdout == ()
+    assert data.untabled == (("holdout-aborted", "no run_end"),)
+
+
+# --- Test 17: regenerable -------------------------------------------------------------------------
+
+
+def test_two_builds_are_equal_and_a_copied_ledger_regenerates(pilot: Pilot, tmp_path: Path) -> None:
+    """Two builds over the same runs are equal; so is a build over a copied ledger root."""
+    first = _report(pilot, _ids(pilot))
+    assert _report(pilot, _ids(pilot)) == first
+    copied = tmp_path / "ledgers"
+    shutil.copytree(pilot.ledger, copied)
+    assert build_phase1_report_data(copied, _ids(pilot), bootstrap_seed=0) == first

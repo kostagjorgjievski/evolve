@@ -33,6 +33,12 @@ entry 20's report reads.
   backoff waits recorded but not charged, the pilot comes first (shift3,
   1 seed), lineages run one at a time detached on sp-1, and reproducibility
   means re-running a lineage from its recorded responses with no API call.
+- Owner decision #165 (request #167): the recorded client serves replies per
+  prompt key first-in first-out, and a key whose replies are used up raises.
+  Three proposals in one generation share one prompt and get three distinct
+  replies at the default `temperature=1.0`; the W12 replay audit must see
+  them replay in order (`matches_source_run: true`). PR D implements it,
+  in `improver/` only, before W12 is dispatched.
 - PR #155's review note: the artifact validator is a grammar, not a
   CPU/memory sandbox (`**` is banned but `range(1000000000000)` is
   grammatical), so every evaluation of a child artifact runs in a subprocess
@@ -84,18 +90,23 @@ entry 20's report reads.
 ## Rules for all PRs
 
 - Branches `feat/phase1-lineage`, `feat/phase1-weights-space`,
-  `feat/phase1-holdout` from up-to-date `main`, one PR at a time; the
-  developer opens, the reviewer squash-merges; stop after opening each PR.
+  `feat/phase1-holdout`, `fix/improver-fifo-replay` from up-to-date `main`,
+  one PR at a time; the developer opens, the reviewer squash-merges; stop
+  after opening each PR.
 - Commit scopes: `runner` for the engine, evaluator, holdout and CLI;
-  `improver` for PR B's artifact and prompt additions. Conventional Commits.
+  `improver` for PR B's artifact and prompt additions and for PR D's
+  recorded client. Conventional Commits.
 - No edits under `arena/`, `ledger/`, `cache/`, `updater/`, `selfmodel/`,
-  `allocator/` (PR B adds to `improver/` only), none under `.github/` (the
-  launcher is **W12**, owner-applied, below), none to `.importlinter`.
+  `allocator/` (PRs B and D add to `improver/` only; PR D also rewords one
+  comment in `tests/runner/test_phase1.py` — text only, no assertions),
+  none under `.github/` (the launcher is **W12**, owner-applied, below),
+  none to `.importlinter`.
 - Python 3.11 stdlib only in the new modules: `subprocess`, `resource`,
   `os`, `signal` for the evaluator; no new dependency of any weight.
 - Tests in `tests/runner/` (new: `test_phase1_eval.py`, `test_phase1.py`,
   `test_phase1_holdout.py`) and `tests/improver/` (additions to
-  `test_artifacts.py`), fixtures in `tmp_path`, no real datasets, no LLM
+  `test_artifacts.py`, `test_client.py` and `test_propose.py`), fixtures in
+  `tmp_path`, no real datasets, no LLM
   network calls (a scripted fake client exposes `last_call` like
   TASK_017's tests do). The real runs are W12, owner-dispatched.
 - ruff, ruff-format and mypy as everywhere; `improver/` stays in the strict
@@ -612,6 +623,118 @@ None.
 
 ~400 changed lines expected; single PR.
 
+## PR D: `fix/improver-fifo-replay`
+
+The per-key FIFO recorded client (owner decision #165, request #167).
+Within one generation every LLM call carries the same prompt (same parent,
+same observation), so at `--proposals-per-generation 3` the source run
+records three distinct replies to one prompt key at `temperature=1.0`;
+`recorded_responses` currently keeps only the last per key, so a replay
+would collapse the three children into copies of the last one and fail
+`matches_source_run` for a harness reason, not a run reason. The replay
+must serve each key's replies in recorded order; a used-up key is an
+error, never a silent reuse. Lands after PR C, before W12 is dispatched.
+
+### Files and interfaces
+
+- `improver/client.py`:
+  - new `RecordedRepliesExhausted(RuntimeError)` — a prompt key's recorded
+    replies are used up; deliberately **not** an `LLMClientError` subclass,
+    so `_llm_proposal`'s `except LLMClientError` cannot swallow it into a
+    fallback no-op;
+  - `RecordedLLMClient.__init__(responses: Mapping[str, Sequence[LLMResponse
+    | RecordedLLMFailure]])` — copies every key's sequence into its own
+    deque, so the caller's structures are never mutated;
+  - `RecordedLLMClient.complete` — pops the key's front outcome: an empty
+    queue raises `RecordedRepliesExhausted` naming the key's SHA-256; a
+    popped `RecordedLLMFailure` raises its recorded `LLMClientError`
+    message and leaves `last_call` `None`; a popped response sets the
+    zero-cost `last_call` and returns, exactly as today. An **unknown** key
+    keeps today's `LLMClientError` naming the key's SHA-256 (TASK_017
+    test 22 is pinned, unchanged).
+- `improver/propose.py`: `recorded_responses(blobs, records) ->
+  dict[str, list[LLMResponse | RecordedLLMFailure]]` — appends each call's
+  outcome to its key's list, in ledger record order and, within a
+  proposal, in call order; duplicates preserved, the last-wins overwrite
+  gone.
+- No change anywhere else. `runner/phase1.py`'s
+  `RecordedLLMClient(recorded_responses(blobs, source.records))` is
+  type-compatible as it stands; `prompt_key`, the `LLMClient` protocol,
+  prompt/response blobs, records and the ledger schema are untouched —
+  which is why this is an `improver/` PR and not a `protocol/` one.
+- Docstrings that state the old one-outcome-per-key rule are updated (the
+  module docstrings of `client.py` and `propose.py`, `RecordedLLMClient`,
+  `recorded_responses`), plus the comment above
+  `tests/runner/test_phase1.py::_source_and_replay`, which describes the
+  pre-FIFO replay rule — comment text only, no assertion changes.
+
+### Exact behaviour
+
+- FIFO is exactly call order per key: `recorded_responses` reads records
+  in ledger order and each proposal's prompt and audit lists in call
+  order, so appending preserves the source run's per-key call sequence.
+  Repair prompts are distinct keys whenever their failure texts differ,
+  and when they coincide the queue serves them in order all the same.
+- Consumption happens on every exit path of `complete` — a served reply or
+  a raised recorded failure — because each recorded call was one outcome
+  of its key's queue.
+- Exhaustion is loud. `RecordedRepliesExhausted` propagates out of
+  `propose_and_record` (nothing is written for that proposal: blobs are
+  written only after `_llm_proposal` returns) and, inside a lineage
+  replay, ends the run `aborted` through the `Run` context exactly like
+  any mid-generation crash (test 17's path) — the runner needs no change.
+  A replay that asks for a reply its records do not hold is a harness
+  defect, reported as one (AGENTS.md 2.8), never a fabricated no-op.
+- Edge cases: the empty mapping; a key mapped to an empty sequence
+  (exhausts on its first call); a failure followed by successes under one
+  key; three identical replies (order trivially preserved — the runner
+  replay tests' same-reply rounds stay green with no assertion edits).
+
+### Tests for PR D (all required)
+
+1. client: three distinct recorded replies to one prompt key replay in
+   recorded order — `complete` returns reply 1, then 2, then 3; each sets
+   `last_call` to the zero-cost audit (one synthetic ok attempt, zero
+   tokens, 0.0 wall).
+2. client: the fourth call on the exhausted key raises
+   `RecordedRepliesExhausted` naming the key's SHA-256, leaves `last_call`
+   `None`, and a different key with replies left still serves afterwards.
+3. client: `RecordedRepliesExhausted` is not an `LLMClientError` (an
+   explicit `not isinstance` assertion) — pinned so the proposer can never
+   swallow exhaustion into a fallback no-op.
+4. client: a key recorded `[failure, response]` — the first call raises
+   the recorded message with no `last_call`; the second returns the
+   response (the failure consumed its own slot).
+5. client: an unknown prompt key still raises `LLMClientError` containing
+   the key's SHA-256 (TASK_017 test 22, unchanged).
+6. client: the sequences handed to the constructor are bit-unchanged after
+   any number of `complete` calls (the client serves from its own copies).
+7. propose: `recorded_responses` keeps duplicates per key in call order —
+   three proposals sharing one prompt (same parent, same observation) with
+   three distinct replies map that key to exactly the three outcomes in
+   order, and a repair prompt stays its own key.
+8. propose, end to end (the owner's first named test): the same three
+   proposals re-run through `RecordedLLMClient(recorded_responses(...))`
+   reproduce each reply's child source and diagnosis (reply *i* → child
+   *i*), every replayed proposal charging zero tokens and zero wall.
+9. propose (the owner's second named test): with the key exhausted, a
+   further `propose_and_record` raises `RecordedRepliesExhausted` and
+   appends no `proposal` record — no fallback no-op is fabricated.
+10. regression: TASK_017's replay tests (successful, failed-call,
+    weights-track) and TASK_018's runner replay tests 18–19 stay green
+    with no assertion edits (identical replies replay identically in
+    order).
+
+### Dependencies
+
+None.
+
+### Size
+
+~250 changed lines expected; single PR. If it grows past the size rule,
+split the client-level change (`client.py` plus its tests) from the
+proposer-level replay tests, client first.
+
 ## Not in this task
 
 - Entry 20 (`exp/phase1-report`): the report's design waits for real runs.
@@ -662,8 +785,9 @@ workflow URL on the task-closing issue; entry 20's task consumes them.
 
 ## Closing the task
 
-1. The developer lands PRs A (possibly A1/A2), B and C in order, one open PR
-   at a time.
+1. The developer lands PRs A (possibly A1/A2), B, C and D in order, one open
+   PR at a time; D must merge before W12 is dispatched, which the stack order
+   already guarantees.
 2. The last merged PR sets `Status: done` on this file's first line and
    sets roadmap entries 19 (and only 19) to its merged PR numbers.
 3. The owner's delegate applies **W12**; the owner dispatches the pilot and

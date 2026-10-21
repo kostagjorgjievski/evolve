@@ -695,10 +695,10 @@ def test_crash_mid_generation_ends_aborted_and_verifies(
 # --- Tests 18 and 19: replay --------------------------------------------------------
 
 #: Within one generation every LLM call carries the same prompt (same parent,
-#: same observation), and ``recorded_responses`` keys by prompt — so a replay
-#: reproduces a round whose replies are identical within it. Distinct live
-#: replies to one prompt are temperature noise the replay audit reports as a
-#: mismatch; the replay tests script same-reply rounds, the shape they pin.
+#: same observation), and ``recorded_responses`` serves each prompt key's
+#: replies first-in first-out — so a replay reproduces a round's distinct
+#: replies in recorded order, and a same-reply round trivially in order; the
+#: replay tests script same-reply rounds, the shape they pin.
 
 
 def _source_and_replay(

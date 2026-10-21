@@ -19,9 +19,16 @@ from evolvets.improver.client import (
     ANTHROPIC_VERSION,
     HttpsLLMClient,
     LLMAttempt,
+    LLMCall,
     LLMClientConfig,
     LLMClientError,
+    RecordedLLMClient,
+    RecordedLLMFailure,
+    RecordedRepliesExhausted,
+    prompt_key,
 )
+from evolvets.improver.interfaces import LLMResponse
+from evolvets.ledger.canonical import sha256_hex
 from tests.improver.fake import ScriptedMonotonic, ScriptedPost, ScriptedSleep
 
 KEY_ENV = "EVOLVETS_LLM_TEST_KEY"
@@ -260,3 +267,102 @@ def test_max_attempts_must_be_at_least_one() -> None:
     with pytest.raises(ValueError, match="max_attempts"):
         LLMClientConfig(max_attempts=True)
     assert LLMClientConfig(max_attempts=1).max_attempts == 1
+
+
+# --- TASK_018 PR D: the per-key FIFO recorded client --------------------------------
+
+
+def zero_cost_audit() -> LLMCall:
+    """The audit every served recorded response leaves: one ok attempt, nothing charged."""
+    return LLMCall(
+        attempts=(LLMAttempt(ok=True, status=None, error=None),),
+        waits_seconds=(),
+        input_tokens=0,
+        output_tokens=0,
+        wall_seconds=0.0,
+    )
+
+
+def test_three_distinct_replies_replay_in_recorded_order() -> None:
+    """PR D test 1: replies served per key first-in first-out, each leaving a zero-cost audit.
+
+    The three proposals of one generation share one prompt and get three
+    distinct replies (owner decision #165); the replay serves them in
+    recorded order — never reversed, repeated or collapsed to the last.
+    """
+    system, user = "be the improver", "edit this module"
+    replies = [
+        LLMResponse("first child", 1, 1, "end_turn"),
+        LLMResponse("second child", 2, 2, "end_turn"),
+        LLMResponse("third child", 3, 3, "end_turn"),
+    ]
+    client = RecordedLLMClient({prompt_key(system, user): list(replies)})
+    for reply in replies:
+        assert client.complete(system, user) == reply
+        assert client.last_call == zero_cost_audit()
+
+
+def test_exhausted_key_raises_naming_its_sha256_and_leaves_no_audit() -> None:
+    """PR D test 2: the call after a key's last reply is loud, and other keys still serve."""
+    system, user = "be the improver", "edit this module"
+    key = prompt_key(system, user)
+    other = prompt_key(system, "a prompt of another generation")
+    client = RecordedLLMClient(
+        {
+            key: [LLMResponse("one", 1, 1, "end_turn"), LLMResponse("two", 1, 1, "end_turn")],
+            other: [LLMResponse("elsewhere", 1, 1, "end_turn")],
+        }
+    )
+    client.complete(system, user)
+    client.complete(system, user)
+    with pytest.raises(RecordedRepliesExhausted) as excinfo:
+        client.complete(system, user)
+    assert sha256_hex(key.encode("utf-8")) in str(excinfo.value)  # names the used-up key
+    assert client.last_call is None  # reset on entry; the replay attempted nothing
+    assert client.complete(system, "a prompt of another generation").text == "elsewhere"
+
+
+def test_exhaustion_is_not_an_llm_client_error() -> None:
+    """PR D test 3: pinned so the proposer can never swallow exhaustion into a no-op.
+
+    A key mapped to an empty sequence exhausts on its first call — the same
+    loud path, not a silent reuse of anything.
+    """
+    system, user = "be the improver", "edit this module"
+    client = RecordedLLMClient({prompt_key(system, user): []})
+    with pytest.raises(RecordedRepliesExhausted):
+        client.complete(system, user)
+    assert not isinstance(RecordedRepliesExhausted("used up"), LLMClientError)
+
+
+def test_recorded_failure_consumes_its_own_slot() -> None:
+    """PR D test 4: a key recorded [failure, response] raises first, serves second."""
+    system, user = "be the improver", "edit this module"
+    key = prompt_key(system, user)
+    response = LLMResponse("the recovery", 4, 2, "end_turn")
+    client = RecordedLLMClient({key: [RecordedLLMFailure("HTTP 429: rate limited"), response]})
+    with pytest.raises(LLMClientError, match="HTTP 429: rate limited"):
+        client.complete(system, user)
+    assert client.last_call is None  # the replay attempted nothing
+    assert client.complete(system, user) == response  # the failure consumed its own slot
+
+
+def test_constructor_copies_every_sequence() -> None:
+    """PR D test 6: the client serves from its own deques; the caller's lists never change."""
+    system, user = "be the improver", "edit this module"
+    key = prompt_key(system, user)
+    other = prompt_key(system, "a prompt of another generation")
+    replies = [LLMResponse("first", 1, 1, "end_turn"), LLMResponse("second", 1, 1, "end_turn")]
+    failures = [RecordedLLMFailure("boom")]
+    handed_over = {key: replies, other: failures}
+    client = RecordedLLMClient(handed_over)
+    client.complete(system, user)
+    client.complete(system, user)
+    with pytest.raises(LLMClientError, match="boom"):
+        client.complete(system, "a prompt of another generation")
+    assert replies == [
+        LLMResponse("first", 1, 1, "end_turn"),
+        LLMResponse("second", 1, 1, "end_turn"),
+    ]  # bit-unchanged, both entries still there
+    assert failures == [RecordedLLMFailure("boom")]
+    assert handed_over == {key: replies, other: failures}

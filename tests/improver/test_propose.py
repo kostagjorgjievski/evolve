@@ -34,6 +34,7 @@ from evolvets.improver.client import (
     LLMClientError,
     RecordedLLMClient,
     RecordedLLMFailure,
+    RecordedRepliesExhausted,
     prompt_key,
 )
 from evolvets.improver.interfaces import IMPROVER_VERSION, LLMResponse
@@ -509,12 +510,12 @@ def test_replay_of_a_failed_proposal_reproduces_the_fallback_for_free(
     base_user = user_prompt(REFERENCE_ARTIFACT_SOURCE, empty_observation())
     responses = recorded_responses(run.blobs, records_of(root, "improver-failed-original"))
     assert len(responses) == 2
-    assert responses[prompt_key(IMPROVER_SYSTEM_PROMPT, base_user)] == LLMResponse(
-        "i am not json at all", 5000, 3000, "end_turn"
-    )
-    assert responses[prompt_key(IMPROVER_SYSTEM_PROMPT, base_user + REPAIR_SUFFIX)] == (
+    assert responses[prompt_key(IMPROVER_SYSTEM_PROMPT, base_user)] == [
+        LLMResponse("i am not json at all", 5000, 3000, "end_turn")
+    ]
+    assert responses[prompt_key(IMPROVER_SYSTEM_PROMPT, base_user + REPAIR_SUFFIX)] == [
         RecordedLLMFailure("giving up after 2 attempts: HTTP 429 rate limited")
-    )
+    ]
 
     replay_run = start_run(root, "improver-failed-replay")
     replay = propose(replay_run, client=RecordedLLMClient(responses))
@@ -1008,9 +1009,9 @@ def test_propose_and_record_system_prompt_default_and_weights(
 
     weights_user = user_prompt(WEIGHTS_REFERENCE_ARTIFACT_SOURCE, empty_observation())
     responses = recorded_responses(weights_run.blobs, records_of(root, "improver-weights-system"))
-    assert responses[prompt_key(WEIGHTS_SYSTEM_PROMPT, weights_user)] == LLMResponse(
-        reply("sharper tracking", WEIGHTS_EDITED_SOURCE), 12, 6, "end_turn"
-    )
+    assert responses[prompt_key(WEIGHTS_SYSTEM_PROMPT, weights_user)] == [
+        LLMResponse(reply("sharper tracking", WEIGHTS_EDITED_SOURCE), 12, 6, "end_turn")
+    ]
     replay_run = start_run(root, "improver-weights-replay")
     replay = propose(
         replay_run,
@@ -1029,3 +1030,165 @@ def test_propose_and_record_system_prompt_default_and_weights(
     defaults = recorded_responses(run.blobs, records_of(root, "improver-default-system"))
     assert prompt_key(IMPROVER_SYSTEM_PROMPT, default_user) in defaults
     assert prompt_key(WEIGHTS_SYSTEM_PROMPT, weights_user) not in defaults
+
+
+# --- TASK_018 PR D: per-key FIFO recorded responses ---------------------------------
+
+
+#: Three replies to the one generation-0 prompt: distinct children, distinct diagnoses.
+FIFO_SOURCES = (
+    EDITED_SOURCE,
+    EDITED_SOURCE.replace("base = 0.5", "base = 0.6"),
+    EDITED_SOURCE.replace("base = 0.5", "base = 0.7"),
+)
+FIFO_DIAGNOSES = ("start from the mean", "raise the level", "raise it further")
+
+
+def fifo_source_run(root: Path) -> Run:
+    """A run whose three generation-0 proposals share one prompt and get three replies.
+
+    Same parent, same observation, so every call carries the same prompt
+    (owner decision #165's setting); the replies differ, as at
+    ``temperature=1.0``.
+    """
+    run = start_run(root, "improver-fifo-source")
+    for diagnosis, source in zip(FIFO_DIAGNOSES, FIFO_SOURCES, strict=True):
+        propose(
+            run,
+            client=ScriptedClient(LLMResponse(reply(diagnosis, source), 100, 40, "end_turn")),
+        )
+    run.end("completed", {})
+    return run
+
+
+def test_recorded_responses_keeps_duplicates_per_key_in_call_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR D test 7: one prompt key can carry several calls' outcomes, nothing overwritten.
+
+    Three proposals sharing one prompt map that key to exactly their three
+    replies in ledger order; a key whose calls were failure-then-success maps
+    to exactly ``[RecordedLLMFailure, LLMResponse]`` in that order; a repair
+    prompt stays its own key.
+    """
+    monkeypatch.setenv("EVOLVETS_LLM_API_KEY", KEY)
+    root = tmp_path / "ledgers"
+    base_user = user_prompt(REFERENCE_ARTIFACT_SOURCE, empty_observation())
+    base_key = prompt_key(IMPROVER_SYSTEM_PROMPT, base_user)
+
+    source = fifo_source_run(root)
+    three = recorded_responses(source.blobs, records_of(root, "improver-fifo-source"))
+    assert three == {
+        base_key: [
+            LLMResponse(reply(diagnosis, child), 100, 40, "end_turn")
+            for diagnosis, child in zip(FIFO_DIAGNOSES, FIFO_SOURCES, strict=True)
+        ]
+    }  # one key, three outcomes in call order — the last-wins overwrite is gone
+
+    failure_first = start_run(root, "improver-fifo-failure-first")
+    post = ScriptedPost((429, rate_limited_body(700, 300)), (429, "rate limited"))
+    propose(
+        failure_first,
+        client=HttpsLLMClient(
+            LLMClientConfig(max_attempts=2),
+            post=post,
+            sleep=ScriptedSleep(),
+            monotonic=ScriptedMonotonic(0.0, 5.0),
+        ),
+    )  # the first proposal's one call raised: an audit with no text
+    propose(
+        failure_first,
+        client=ScriptedClient(
+            LLMResponse(reply("recover on the shared prompt", EDITED_SOURCE), 30, 12, "end_turn")
+        ),
+    )
+    failure_first.end("completed", {})
+    mixed = recorded_responses(failure_first.blobs, records_of(root, "improver-fifo-failure-first"))
+    assert mixed == {
+        base_key: [
+            RecordedLLMFailure("giving up after 2 attempts: HTTP 429 rate limited"),
+            LLMResponse(reply("recover on the shared prompt", EDITED_SOURCE), 30, 12, "end_turn"),
+        ]
+    }
+
+    repair = start_run(root, "improver-fifo-repair")
+    propose(repair, client=exhausting_repair_client()[0])
+    repair.end("completed", {})
+    with_repair = recorded_responses(repair.blobs, records_of(root, "improver-fifo-repair"))
+    assert len(with_repair) == 2  # the base prompt and the repair prompt are distinct keys
+    assert with_repair[prompt_key(IMPROVER_SYSTEM_PROMPT, base_user + REPAIR_SUFFIX)] == [
+        RecordedLLMFailure("giving up after 2 attempts: HTTP 429 rate limited")
+    ]
+
+
+def test_three_shared_prompt_proposals_replay_their_own_replies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR D test 8: reply i replays to child i and diagnosis i, at zero cost.
+
+    The owner's first named test: the same three proposals re-run through
+    ``RecordedLLMClient(recorded_responses(...))`` — each gets its own reply
+    in order, no child a copy of the last one, every replayed proposal
+    charging zero tokens and zero wall.
+    """
+    monkeypatch.setenv("EVOLVETS_LLM_API_KEY", KEY)
+    root = tmp_path / "ledgers"
+    source = fifo_source_run(root)
+    source_records = records_of(root, "improver-fifo-source")
+    responses = recorded_responses(source.blobs, source_records)
+    assert len(responses) == 1
+
+    replay_run = start_run(root, "improver-fifo-replay")
+    client = RecordedLLMClient(responses)
+    replays = [propose(replay_run, client=client) for _ in FIFO_SOURCES]
+    replay_run.end("completed", {})
+
+    for replayed, child, diagnosis in zip(replays, FIFO_SOURCES, FIFO_DIAGNOSES, strict=True):
+        payload = replayed.payload
+        assert isinstance(payload, Proposal)
+        assert blob_json(replay_run.blobs, payload.child_artifact) == child
+        assert payload.diagnosis == diagnosis
+        assert replayed.budget == Budget()  # zero tokens and zero wall
+    replay_children = [record.payload.child_artifact for record in replays]
+    source_children = [
+        record.payload.child_artifact for record in source_records if record.kind == "proposal"
+    ]
+    assert replay_children == source_children  # reply i → child i, digest for digest
+    assert len(set(replay_children)) == 3  # three distinct children, not copies of the last
+    assert replay_run.spent.llm_input_tokens == 0
+    assert replay_run.spent.wall_seconds == 0.0
+    assert validate_run(records_of(root, "improver-fifo-replay")) == []
+
+
+def test_exhausted_key_ends_the_proposal_loudly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR D test 9: the call after a key's last reply appends no proposal record.
+
+    The owner's second named test: with the key used up, a further
+    ``propose_and_record`` raises :class:`RecordedRepliesExhausted` and the
+    ledger still holds exactly the three replayed proposals — no fallback
+    no-op is fabricated for a harness defect (AGENTS.md 2.8).
+    """
+    monkeypatch.setenv("EVOLVETS_LLM_API_KEY", KEY)
+    root = tmp_path / "ledgers"
+    source = fifo_source_run(root)
+    responses = recorded_responses(source.blobs, records_of(root, "improver-fifo-source"))
+    replay_run = start_run(root, "improver-fifo-replay")
+    client = RecordedLLMClient(responses)
+    for _ in FIFO_SOURCES:
+        propose(replay_run, client=client)
+
+    with pytest.raises(RecordedRepliesExhausted):
+        propose(replay_run, client=client)
+
+    replay_run.end("completed", {})
+    records = records_of(root, "improver-fifo-replay")
+    assert [record.kind for record in records] == [
+        "run_start",
+        "proposal",
+        "proposal",
+        "proposal",
+        "run_end",
+    ]  # the exhausted call wrote nothing
+    assert validate_run(records) == []

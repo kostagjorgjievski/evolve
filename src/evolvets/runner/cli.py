@@ -67,6 +67,7 @@ from evolvets.runner.gate1_report import ReportError, build_report
 from evolvets.runner.gate1_sealed import plan_from_tune_run, sealed_run
 from evolvets.runner.gate1_tune import DevPaths, TuneSpec, tune
 from evolvets.runner.phase1 import CONDITIONS, LineageSpec, run_lineage
+from evolvets.runner.phase1_holdout import run_holdout
 from evolvets.runner.runs import RunError, current_git_commit, new_run_id
 from evolvets.updater.baselines import BASELINE_IDS, BASELINES, DEFAULT_CONFIGS
 from evolvets.updater.forecast import (
@@ -655,6 +656,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     phase1_lineage_cmd.add_argument("--data-root", default="data", help="data root directory")
     phase1_lineage_cmd.add_argument(
+        "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+    )
+    phase1_holdout_cmd = phase1_sub.add_parser(
+        "holdout", help="score a finished lineage's accepted edits on a holdout replicate"
+    )
+    phase1_holdout_cmd.add_argument(
+        "--from-run",
+        metavar="RUN_ID",
+        required=True,
+        help="the finished phase1 lineage whose starting artifact and accepted edits are scored",
+    )
+    phase1_holdout_cmd.add_argument(
+        "--dataset",
+        choices=HOLDOUT_DATASETS,
+        required=True,
+        help="holdout replicate to score on (its dataset family must match the lineage's)",
+    )
+    phase1_holdout_cmd.add_argument(
+        "--pool-spec",
+        choices=POOL_SPECS,
+        required=True,
+        help="which pool spec to replay",
+    )
+    phase1_holdout_cmd.add_argument(
+        "--foundation-model",
+        nargs="+",
+        metavar="NAME",
+        help="foundation models to join (simple+foundation only; default: the registry)",
+    )
+    phase1_holdout_cmd.add_argument(
+        "--run-id", metavar="ID", help="run id (default: a fresh phase1-holdout id)"
+    )
+    phase1_holdout_cmd.add_argument(
+        "--ledger-root", default="ledgers", help="ledger root directory (contains <run_id>/)"
+    )
+    phase1_holdout_cmd.add_argument(
+        "--cache-root", default="cache_store", help="cache root directory"
+    )
+    phase1_holdout_cmd.add_argument(
+        "--foundation-root",
+        default=_FOUNDATION_ROOT,
+        help="foundation cache root directory (as 'evolvets foundation build')",
+    )
+    phase1_holdout_cmd.add_argument("--data-root", default="data", help="data root directory")
+    phase1_holdout_cmd.add_argument(
         "--manifest-dir", default="data/manifests", help="directory holding the manifests"
     )
     return parser
@@ -1335,6 +1381,53 @@ def _cmd_phase1_lineage(args: argparse.Namespace) -> int:
     return code if code != 0 else verified
 
 
+def _cmd_phase1_holdout(args: argparse.Namespace) -> int:
+    """Score one lineage's accepted edits on a holdout; OK plus the summary, then the verify.
+
+    A refusal before ``run_start`` (a non-holdout dataset, an unusable or
+    mismatched lineage, an unloadable pool, a dirty tree, a reused run id) is
+    one FAIL line and writes nothing; an aborted run is reported by run id.
+    A non-ok score is a result, not an error: the run ends ``completed`` and
+    exit 0, and any verify violation is non-zero on top.
+    """
+    run_id = args.run_id if args.run_id is not None else new_run_id("phase1-holdout")
+    ledger_root = Path(args.ledger_root)
+    main_stream = ledger_root / run_id / "main.jsonl"
+    reused = main_stream.exists()
+    try:
+        code = run_holdout(
+            args.from_run,
+            dataset=args.dataset,
+            pool_spec=args.pool_spec,
+            foundation_models=tuple(args.foundation_model) if args.foundation_model else None,
+            ledger_root=ledger_root,
+            cache_root=Path(args.cache_root),
+            data_root=Path(args.data_root),
+            manifest_dir=Path(args.manifest_dir),
+            foundation_root=Path(args.foundation_root),
+            run_id=run_id,
+        )
+    except Exception as exc:
+        # A run this invocation started and aborted is reported by run id; a
+        # refusal before start is not.
+        if main_stream.exists() and not reused:
+            print(f"FAIL {run_id} aborted: {exc}")
+        else:
+            print(f"FAIL {exc}")
+        return 1
+    records = list(LedgerReader(ledger_root, run_id).records())
+    run_end = records[-1].payload
+    summary = run_end.summary if isinstance(run_end, RunEnd) else {}
+    status = run_end.status if isinstance(run_end, RunEnd) else "aborted"
+    if code == 0:
+        print(f"OK {run_id} {status}")
+    else:
+        print(f"FAIL {run_id} {status}: {summary.get('error', 'the run aborted')}")
+    print(canonical_json(summary))
+    verified = _cmd_ledger_verify(str(ledger_root), run_id)
+    return code if code != 0 else verified
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the EvolveTS CLI."""
     parser = build_parser()
@@ -1443,6 +1536,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "phase1":
         if args.phase1_command == "lineage":
             return _cmd_phase1_lineage(args)
+        if args.phase1_command == "holdout":
+            return _cmd_phase1_holdout(args)
         parser.print_help()
         return 0
     if args.command is None:

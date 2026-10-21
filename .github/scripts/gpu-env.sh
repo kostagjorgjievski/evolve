@@ -11,7 +11,8 @@
 # Usage: gpu-env.sh <dependency-group> <venv-dir>
 set -euo pipefail
 group="$1"; venv="$2"
-export PATH="$HOME/.local/bin:$PATH"
+# Per-architecture tools first: lab home directories are shared across machines.
+export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
 req="$(mktemp)"
 trap 'rm -f "$req"' EXIT
 # A node without a system Python 3.11 (DGX Spark ships Ubuntu 24.04 / 3.12)

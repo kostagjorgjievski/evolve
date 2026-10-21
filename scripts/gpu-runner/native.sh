@@ -30,12 +30,17 @@ case "$cmd" in
   setup)
     : "${RUNNER_TOKEN:?setup needs RUNNER_TOKEN}"
     mkdir -p "$dir" "$data"
-    export PATH="$HOME/.local/bin:$PATH"
-    if ! command -v uv >/dev/null 2>&1; then
-      curl -LsSf https://astral.sh/uv/install.sh | sh \
-        || python3 -m pip install --user --break-system-packages -i https://pypi.tuna.tsinghua.edu.cn/simple uv
+    # The lab's home directories are shared between machines of different
+    # architectures, so tools go in a per-architecture bin directory.
+    bin="$HOME/.local/$(uname -m)/bin"
+    mkdir -p "$bin"
+    export PATH="$bin:$PATH"
+    if ! "$bin/uv" --version >/dev/null 2>&1; then
+      curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$bin" INSTALLER_NO_MODIFY_PATH=1 sh \
+        || python3 -m pip install --target "$bin/.uvpkg" -i https://pypi.tuna.tsinghua.edu.cn/simple uv \
+             && ln -sf "$bin/.uvpkg/bin/uv" "$bin/uv"
     fi
-    uv --version
+    "$bin/uv" --version
     cd "$dir"
     if [ ! -x ./run.sh ]; then
       case "$(uname -m)" in aarch64) arch=arm64 ;; x86_64) arch=x64 ;; *) echo "unsupported arch"; exit 1 ;; esac
@@ -50,7 +55,7 @@ case "$cmd" in
     touch .env && chmod 600 .env
     for kv in "EVOLVETS_DATA=$data" "HF_HOME=$data/hf" "UV_CACHE_DIR=$data/uv-cache" \
               "UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple" "HF_ENDPOINT=https://hf-mirror.com" \
-              "PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"; do
+              "PATH=$HOME/.local/$(uname -m)/bin:/usr/local/bin:/usr/bin:/bin"; do
       key="${kv%%=*}"
       grep -q "^${key}=" .env && sed -i "s#^${key}=.*#${kv}#" .env || echo "$kv" >> .env
     done

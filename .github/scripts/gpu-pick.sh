@@ -35,6 +35,10 @@ try_pick() {
   busy="$(busy_uuids)"
   while IFS=, read -r idx uuid mem util; do
     idx="${idx// /}"; uuid="${uuid// /}"; mem="${mem// /}"; util="${util// /}"
+    # Unified-memory GPUs (DGX Spark GB10) report memory.used as [N/A]; there
+    # the compute-process and utilization checks decide.
+    [[ "$mem" =~ ^[0-9]+$ ]] || mem=0
+    [[ "$util" =~ ^[0-9]+$ ]] || util=0
     if grep -qx "$uuid" <<<"$busy"; then continue; fi
     if [ "$mem" -ge "$mem_max" ] || [ "$util" -ge "$util_max" ]; then continue; fi
     # mkdir is atomic: only one job can create the lock directory.

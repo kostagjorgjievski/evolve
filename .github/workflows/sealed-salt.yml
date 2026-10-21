@@ -51,12 +51,12 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Python environment from uv.lock
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           bash .github/scripts/run-logged.sh "python env" bash .github/scripts/gpu-env.sh dev "$VENV"
       - name: Create the salt (20 worlds per family)
         run: |
           umask 077
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           bash .github/scripts/run-logged.sh "init-salt" "$VENV/bin/evolvets" sealed init-salt \
             --per-family 20 --data-root "$SEALED_DATA" --manifest-dir data/manifests
       - name: Check the salt file mode

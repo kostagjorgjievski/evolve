@@ -85,7 +85,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Python environment from uv.lock
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           bash .github/scripts/run-logged.sh "python env" bash .github/scripts/gpu-env.sh dev "$VENV"
       - name: Probe pieces
         env:
@@ -94,7 +94,7 @@ jobs:
           SEED: ${{ inputs.seed }}
           PIECES: ${{ inputs.pieces }}
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           test -z "$(git status --porcelain)" || { echo "dirty tree"; git status --porcelain; exit 1; }
           logdir="$(mktemp -d)"
           pids=()

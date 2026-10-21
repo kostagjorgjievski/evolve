@@ -167,7 +167,9 @@ class InheritanceRow:
     (``start`` for *i* = 1); an accepted edit whose row or whose
     predecessor's row is not ``ok`` is unjudgeable, counted and excluded.
     The rate is a share of accepted edits, never of evaluations; a lineage
-    that accepted nothing has ``judged = 0`` and rate ``None``.
+    that accepted nothing has ``judged = 0`` and rate ``None``, and its
+    ``holdout_gain`` is ``0.0`` because its start and final rows are one
+    row — a structural zero, not a measured gain.
     """
 
     condition: str
@@ -745,19 +747,28 @@ def _cross_check_summary(run: _NamedRun, numbers: _LineageNumbers) -> None:
 # --- the series bootstrap of Definition 2 ---------------------------------------------------------
 
 
-def _final_scored_record(records: Sequence[Record]) -> Record:
+def _final_scored_record(records: Sequence[Record], where: str) -> Record:
     """The record the bootstrap pairs with the baseline.
 
     The final accepted artifact's evaluation record; the baseline itself
     when the lineage accepted nothing, for its starting artifact is then
-    also its final one (all-zero differences).
+    also its final one (all-zero differences). An acceptance whose
+    evaluation record is missing cannot reach the fallback: the shape check
+    refused it first, and the refusal is restated here so the fallback
+    stays a no-acceptance fallback, never a mask.
     """
     by_id = {record.record_id: record for record in records}
     final: Record | None = None
     for record in records:
         payload = record.payload
         if record.kind == "acceptance" and isinstance(payload, Acceptance) and payload.accepted:
-            final = by_id.get(record.refers_to[1])
+            evaluation = by_id.get(record.refers_to[1])
+            if evaluation is None or evaluation.kind != "evaluation":
+                raise Phase1ReportError(
+                    f"{where} record {record.record_id}: an acceptance must refer "
+                    "to its evaluation record second"
+                )
+            final = evaluation
     return records[1] if final is None else final  # the baseline sits at index 1
 
 
@@ -773,7 +784,7 @@ def _gain_interval(
     """
     where = f"run {run.run_id}"
     baseline = run.records[1]
-    final = _final_scored_record(run.records)
+    final = _final_scored_record(run.records, where)
     start = _series_of(blobs, run.run_id, baseline)
     finish = _series_of(blobs, run.run_id, final)
     if start is None or finish is None:

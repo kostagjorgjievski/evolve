@@ -1234,6 +1234,50 @@ def test_calibration_counts_coverages_and_means(pilot: Pilot) -> None:
     assert by_condition["fixed"].never_evaluated == 3  # one unevaluated proposal per generation
 
 
+def test_a_not_ok_evaluation_counts_apart_and_leaves_every_average(pilot: Pilot) -> None:
+    """A predicted proposal evaluated not-ok is its own column and nothing else.
+
+    The pilot's fixtures evaluate ok everywhere, so this lineage — one child
+    failed in dev, then a climb and an equal-scoring repeat — pins the
+    not-ok branch on its own: the failed proposal is counted in
+    ``not_ok_evaluated``, joins no average and never lands in
+    ``never_evaluated``, which stays untouched at zero. It runs the pilot's
+    limits but is reported alone, like the other single-lineage builds: a
+    second ``predictive`` lineage cannot share the pilot's build.
+    """
+    assert (
+        _lineage(
+            pilot,
+            "lineage-not-ok",
+            "predictive",
+            spec={"proposals_per_generation": 1},
+            responses=[reply(CHILD_A), reply(CHILD_B), reply(CHILD_B)],
+            outcomes={
+                REFERENCE_ARTIFACT_SOURCE: scored(1.0),
+                CHILD_A: failed("arena: worker crashed on import"),
+                CHILD_B: scored(0.8),
+            },
+        )
+        == 0
+    )
+    row = _report(pilot, ["lineage-not-ok"]).calibration[0]
+    realized, not_ok, never = _hand_calibration(_records(pilot, "lineage-not-ok"))
+    assert not_ok >= 1  # the fixture's point: a predicted proposal, evaluated not-ok
+    gains = [parent - child for parent, child, _quantiles in realized]
+    assert gains == [1.0 - 0.8, 0.8 - 0.8]  # the failed child joined no realized gain
+    inside_90 = sum(1 for parent, child, q in realized if q["q05"] <= parent - child <= q["q95"])
+    inside_50 = sum(1 for parent, child, q in realized if q["q25"] <= parent - child <= q["q75"])
+    assert (row.predictions, row.realized) == (3, len(realized)) == (3, 2)
+    assert (row.not_ok_evaluated, row.never_evaluated) == (not_ok, never) == (1, 0)
+    assert row.coverage_90 == inside_90 / len(realized)
+    assert row.coverage_50 == inside_50 / len(realized)
+    assert row.mean_q50 == _loop_mean([q["q50"] for _p, _c, q in realized])
+    assert row.mean_gain == _loop_mean(gains)
+    assert row.mean_q50_error == _loop_mean(
+        [q["q50"] - (parent - child) for parent, child, q in realized]
+    )
+
+
 def test_a_no_proposal_lineage_calibrates_to_zeros(pilot: Pilot) -> None:
     """A lineage that proposed nothing has zero counts and no coverages, in its own build.
 

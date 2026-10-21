@@ -22,7 +22,10 @@ The reference artifact is ``bias_share`` translated into the grammar
 operation for operation (``updater/forecast.py`` with ``updater/baselines.py``
 ``_share_step`` inlined): the lineage's starting point. The float discipline —
 the same operations in the same order — makes the translation bit-equal to the
-class original on replay, which ``tests/improver/test_artifacts.py`` pins.
+class original on replay, which ``tests/improver/test_artifacts.py`` pins. The
+weights reference is ``fixed_share`` translated the same way, its ``update``
+returning weight rows over the experts instead of a forecast: the starting
+point of the weights-only condition (the (f) ablation), pinned the same way.
 
 Imports here are only the standard library and ``evolvets.updater.interfaces``
 (the contract): the direction is improver -> updater, never the reverse, and
@@ -55,6 +58,12 @@ class ArtifactError(ValueError):
 #: The reference artifact's configuration: ``bias_share``'s placeholder config.
 REFERENCE_ARTIFACT_CONFIG: Mapping[str, float] = MappingProxyType(
     {"eta": 1.0, "alpha": 0.01, "bias_rate": 0.1}
+)
+
+#: The weights reference artifact's configuration: ``fixed_share``'s placeholder
+#: config (``updater/baselines.py`` ``_DEFAULT_CONFIGS``).
+WEIGHTS_REFERENCE_ARTIFACT_CONFIG: Mapping[str, float] = MappingProxyType(
+    {"eta": 1.0, "alpha": 0.01}
 )
 
 #: The pure functions an artifact may call on the loader-provided ``math``.
@@ -906,3 +915,118 @@ def update(state, feedback, context):
 #: The starting artifact of every Phase 1 lineage, in normalised form; the
 #: pinned SHA-256 of these bytes is in tests/improver/test_artifacts.py.
 REFERENCE_ARTIFACT_SOURCE: str = normalized_source(_REFERENCE_ARTIFACT_TEXT)
+
+# --- the weights reference artifact -------------------------------------------------
+
+
+#: The weights-only condition's starting artifact as written for this module,
+#: normalised at import: fixed_share translated into the artifact grammar,
+#: operation for operation — the validation of ``_checked_init``/``_checked_eta``/
+#: ``_checked_alpha``, then per matured origin and horizon column the shared
+#: loss (``_loss_column``) and the Fixed-Share step (``_share_step``) in place
+#: on the column's weights — with ``update`` returning the weight rows
+#: ``[expert][h - 1]`` the transposition in ``FixedShare.update`` builds. The
+#: state is a dict; ``weights`` is indexed [h] (per horizon column), with the
+#: expert index inside each row.
+_WEIGHTS_REFERENCE_ARTIFACT_TEXT = '''"""Fixed-Share: the weights-only reference updater artifact.
+
+fixed_share (updater/baselines.py) translated into the artifact grammar,
+operation for operation, _share_step inlined. update returns weight rows
+[expert][h - 1], not a forecast: under weights-v1 a flat output is invalid.
+The state is a dict; everything per-series travels through it.
+"""
+
+
+def init(n_experts, horizon, config, seed):
+    "Validate the arguments and build the initial state."
+
+    def checked_unit(name, value):
+        "Return value as a finite number in [0, 1], else raise ValueError."
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(name + " must be a number")
+        if not math.isfinite(value) or value < 0.0 or value > 1.0:
+            raise ValueError(name + " must be a finite number in [0, 1]")
+        return value
+
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed must be an int")
+    if isinstance(n_experts, bool) or not isinstance(n_experts, int) or n_experts < 1:
+        raise ValueError("n_experts must be an int >= 1")
+    if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon < 1:
+        raise ValueError("horizon must be an int >= 1")
+    if "eta" not in config or "alpha" not in config:
+        raise ValueError("config keys must be exactly eta, alpha")
+    if len(config) != 2:
+        raise ValueError("config keys must be exactly eta, alpha")
+    eta = config["eta"]
+    if isinstance(eta, bool) or not isinstance(eta, (int, float)):
+        raise ValueError("eta must be a number")
+    if not math.isfinite(eta) or eta <= 0:
+        raise ValueError("eta must be a finite number > 0")
+    alpha = checked_unit("alpha", config["alpha"])
+    weights = []
+    for h in range(horizon):
+        row = []
+        for e in range(n_experts):
+            row.append(1.0 / n_experts)
+        weights.append(row)
+    return {
+        "n_experts": n_experts,
+        "horizon": horizon,
+        "eta": eta,
+        "alpha": alpha,
+        "weights": weights,
+    }
+
+
+def update(state, feedback, context):
+    "Take a Fixed-Share step per matured origin and column, then answer rows."
+    n_experts = state["n_experts"]
+    horizon = state["horizon"]
+    eta = state["eta"]
+    alpha = state["alpha"]
+    weights = state["weights"]
+    for matured in feedback:
+        errors = matured.errors
+        for h in range(horizon):
+            top = abs(errors[0][h])
+            for e in range(1, n_experts):
+                scaled = abs(errors[e][h])
+                if scaled > top:
+                    top = scaled
+            losses = []
+            if top > 0.0:
+                for e in range(n_experts):
+                    losses.append(abs(errors[e][h]) / top)
+            else:
+                for e in range(n_experts):
+                    losses.append(0.0)
+            row = weights[h]
+            support = []
+            for e in range(n_experts):
+                if row[e] > 0.0:
+                    support.append(e)
+            low = losses[support[0]]
+            for e in support[1:]:
+                if losses[e] < low:
+                    low = losses[e]
+            scores = [0.0] * n_experts
+            for e in support:
+                scores[e] = row[e] * math.exp(-eta * (losses[e] - low))
+            total = 0.0
+            for e in range(n_experts):
+                total = total + scores[e]
+            for e in range(n_experts):
+                row[e] = (1.0 - alpha) * (scores[e] / total) + alpha / n_experts
+    rows = []
+    for e in range(n_experts):
+        row = []
+        for h in range(horizon):
+            row.append(weights[h][e])
+        rows.append(tuple(row))
+    return (tuple(rows), state)
+'''
+
+#: The starting artifact of the weights-only condition, in normalised form;
+#: the pinned SHA-256 of these bytes is in tests/improver/test_artifacts.py.
+WEIGHTS_REFERENCE_ARTIFACT_SOURCE: str = normalized_source(_WEIGHTS_REFERENCE_ARTIFACT_TEXT)

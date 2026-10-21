@@ -187,12 +187,12 @@ def _error_audit_object(call: LLMCall | None, message: str) -> dict[str, object]
 def _llm_proposal(
     client: _AuditedClient,
     config: LLMClientConfig,
+    system: str,
     parent_source: str,
     observation: dict[str, object],
     max_repair_rounds: int,
 ) -> tuple[ProposalDraft, list[dict[str, object]], list[dict[str, object]], Budget]:
     """Call the LLM (with repairs); the draft, per-call prompts and audits, the cost."""
-    system = IMPROVER_SYSTEM_PROMPT
     base_user = user_prompt(parent_source, observation)
     user = base_user
     prompts: list[dict[str, object]] = []
@@ -328,6 +328,7 @@ def propose_and_record(
     client: LLMClient | None = None,  # required by "llm_edit"
     client_config: LLMClientConfig | None = None,
     max_repair_rounds: int = 1,
+    system_prompt: str = IMPROVER_SYSTEM_PROMPT,  # the weights-only track's own contract
 ) -> Record:
     """Propose one edit of ``parent_source`` and append its ``proposal`` record.
 
@@ -335,7 +336,9 @@ def propose_and_record(
     observation, and — for the LLM proposer — the per-call prompt and response
     audit objects), then the record, charged with the proposer's tokens and
     wall time; the random proposer charges wall time only. ``refers_to`` links
-    the parent proposal, or nothing at generation 0.
+    the parent proposal, or nothing at generation 0. The prompt blobs carry
+    ``system_prompt`` verbatim, so the weights track's prompts are replayable
+    the same way the default's are.
     """
     del parent_gain  # the pinned signature carries it for the harness; nothing records it in A2
     if proposer_id not in PROPOSER_IDS:
@@ -351,6 +354,7 @@ def propose_and_record(
         draft, prompts, audits, budget = _llm_proposal(
             cast("_AuditedClient", client),
             client_config,
+            system_prompt,
             parent_source,
             observation,
             max_repair_rounds,

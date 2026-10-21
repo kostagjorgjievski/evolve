@@ -71,11 +71,11 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Python environment from uv.lock
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           bash .github/scripts/run-logged.sh "python env" bash .github/scripts/gpu-env.sh dev "$VENV"
       - name: Tune
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           git status --porcelain
           set +e
           bash .github/scripts/run-logged.sh "gate1 tune" "$VENV/bin/evolvets" gate1 tune \

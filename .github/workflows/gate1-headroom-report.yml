@@ -67,7 +67,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Python environment from uv.lock
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           bash .github/scripts/run-logged.sh "python env" bash .github/scripts/gpu-env.sh dev "$VENV"
       - name: Check each run's recorded commit
         env:
@@ -89,7 +89,7 @@ jobs:
           RUN_IDS: ${{ inputs.run_ids }}
           BOOTSTRAP_SEED: ${{ inputs.bootstrap_seed }}
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           mkdir -p out
           run_args=()
           for run in $RUN_IDS; do run_args+=(--run "$run"); done

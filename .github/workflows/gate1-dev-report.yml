@@ -67,7 +67,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Python environment from uv.lock
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           bash .github/scripts/run-logged.sh "python env" bash .github/scripts/gpu-env.sh dev "$VENV"
       - name: Pick the run and check its commit
         env:
@@ -120,7 +120,7 @@ jobs:
         env:
           BOOTSTRAP_SEED: ${{ inputs.bootstrap_seed }}
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           mkdir -p out
           probe_args=()
           for probe in $PROBE_IDS; do probe_args+=(--probe-run "$probe"); done

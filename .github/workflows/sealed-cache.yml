@@ -79,13 +79,13 @@ jobs:
           if [ "$MODEL" = "simple" ]; then echo "CUDA_VISIBLE_DEVICES=" >> "$GITHUB_ENV"; fi
       - name: Python environment from uv.lock
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           bash .github/scripts/run-logged.sh "python env" bash .github/scripts/gpu-env.sh "$GROUP" "$VENV"
       - name: Real data into the sealed data root (verify, else fetch and prepare)
         if: inputs.dataset != 'synthetic-sealed'
         run: |
           umask 077
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           ev="$VENV/bin/evolvets"
           if ! "$ev" data verify "$DATASET" --data-root "$SEALED_DATA" --manifest-dir data/manifests; then
             bash .github/scripts/run-logged.sh "data fetch" "$ev" data fetch "$DATASET" \
@@ -99,21 +99,21 @@ jobs:
         if: inputs.model == 'simple'
         run: |
           umask 077
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           bash .github/scripts/run-logged.sh "sealed build-cache" "$VENV/bin/evolvets" sealed build-cache \
             "$DATASET" --data-root "$SEALED_DATA" --manifest-dir data/manifests \
             --sealed-cache-root "$SEALED_CACHE"
       - name: Smoke check on the GPU
         if: inputs.model != 'simple'
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           bash .github/scripts/run-logged.sh "foundation smoke" "$VENV/bin/evolvets" foundation smoke \
             --model "$MODEL" --device cuda
       - name: Build the sealed foundation cache
         if: inputs.model != 'simple'
         run: |
           umask 077
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           bash .github/scripts/run-logged.sh "sealed build-foundation-cache" "$VENV/bin/evolvets" \
             sealed build-foundation-cache "$DATASET" --model "$MODEL" --device cuda \
             --batch-size "$BATCH_SIZE" --data-root "$SEALED_DATA" --manifest-dir data/manifests \

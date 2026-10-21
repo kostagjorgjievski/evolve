@@ -75,7 +75,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Python environment from uv.lock
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           bash .github/scripts/run-logged.sh "python env" bash .github/scripts/gpu-env.sh dev "$VENV"
       - name: Tune each dataset
         env:
@@ -83,7 +83,7 @@ jobs:
           SEED: ${{ inputs.seed }}
           DATASETS: ${{ inputs.datasets }}
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           git status --porcelain
           stamp="$(date -u +%Y%m%dT%H%M%SZ)"
           sha8="$(printf '%s' "${GITHUB_SHA}" | cut -c1-8)"

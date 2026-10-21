@@ -65,7 +65,7 @@ jobs:
           UV_INDEX_URL: ${{ vars.GPU_PIP_INDEX_URL }}
           UV_PYTHON_PREFERENCE: only-system
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$HOME/.local/$(uname -m)/bin:$HOME/.local/bin:$PATH"
           cat > /tmp/smoke.py <<'EOF'
           import torch
           print("torch", torch.__version__, "built for CUDA", torch.version.cuda)

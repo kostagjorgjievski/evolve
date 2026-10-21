@@ -8,7 +8,8 @@ evaluation that must never reach a prompt — and the replay test proves a
 proposal re-derives from its recorded responses at zero cost. The review of
 PR A2 added one more end-to-end path: a real ``HttpsLLMClient`` over a
 scripted ``post`` that raises mid-proposal must still be recorded, charged
-and replayable.
+and replayable. TASK_018 PR B added the object space's own system prompt and
+the ``propose_and_record`` keyword that threads it (tests at the end).
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import pytest
 
 from evolvets.improver.artifacts import (
     REFERENCE_ARTIFACT_SOURCE,
+    WEIGHTS_REFERENCE_ARTIFACT_SOURCE,
     artifact_family,
     diff_lines,
     validate_artifact_source,
@@ -36,7 +38,12 @@ from evolvets.improver.client import (
 )
 from evolvets.improver.interfaces import IMPROVER_VERSION, LLMResponse
 from evolvets.improver.observations import ImproverError, observation_object
-from evolvets.improver.prompt import IMPROVER_SYSTEM_PROMPT, prompt_object, user_prompt
+from evolvets.improver.prompt import (
+    IMPROVER_SYSTEM_PROMPT,
+    WEIGHTS_SYSTEM_PROMPT,
+    prompt_object,
+    user_prompt,
+)
 from evolvets.improver.propose import (
     ProposerError,
     propose_and_record,
@@ -895,3 +902,130 @@ def test_prompts() -> None:
         "temperature": 0.7,
         "max_tokens": 1024,
     }
+
+
+# --- TASK_018 PR B: the weights system prompt (tests 3-4) ---------------------------
+
+
+#: The default system prompt, byte-for-byte as PR A merged it: adding the
+#: weights track's prompt must leave every existing caller's prompts identical.
+DEFAULT_PROMPT = """You improve updater artifacts: small Python modules that combine \
+and adapt cached expert forecasts online. Your task: edit the given forecast-v2 updater module \
+so that its dev pooled MASE falls.
+
+Reply with exactly one JSON object and nothing else — no prose, no markdown, no code fences:
+{"diagnosis": "<a short string: what you changed and why>", "source": "<the complete new module \
+source>"}
+
+The artifact rules. Anything violating them is discarded:
+- The module holds exactly two top-level functions, init(n_experts, horizon, config, seed) and \
+update(state, feedback, context), and nothing else at module level (an optional docstring \
+excepted).
+- No imports at all. math is provided as a global: math.exp, math.sqrt, math.log, math.isfinite \
+and math.fabs are the only math functions.
+- Allowed calls: the pinned builtins abs, min, max, float, int, bool, len, range, tuple, list, \
+dict, sorted, enumerate, zip, isinstance, str, ValueError; nested functions you define and call \
+by name; and exactly the two one-argument method calls x.pop(k) and x.append(v). No other method \
+call exists.
+- The only raise form is raise ValueError(<one argument>); the message may be built from string \
+constants and str() concatenation, but no f-string.
+- Allowed operators: + - * / % //, unary - + not, comparisons, and, or, and the conditional \
+expression (a if c else b). ** is not allowed.
+- Allowed statements: def, for, if, return, plain and augmented assignment, pass, docstrings, \
+and allowed calls as statements. No while, no try, no lambda, no comprehension (list, set, dict \
+or generator), no walrus :=, no break or continue, no class, no delete, no global or nonlocal, \
+no async.
+- All state travels through the state object init returns and update threads through; the \
+module itself stores nothing.
+- Every numeric constant must be finite.
+
+The "source" you reply with must be the complete module — never a diff, a fragment or an \
+explanation."""
+
+
+#: One params edit of the weights reference: the share step's effective learning rate doubled.
+WEIGHTS_EDITED_SOURCE = WEIGHTS_REFERENCE_ARTIFACT_SOURCE.replace(
+    "row[e] * math.exp(-eta * (losses[e] - low))",
+    "row[e] * math.exp(-2.0 * eta * (losses[e] - low))",
+)
+
+
+def test_weights_system_prompt_states_the_rows_rule() -> None:
+    """The weights prompt: the same contract over weights-v1 with the rows rule added.
+
+    It names the object space, the rule update's output must obey (rows over
+    the experts, finite and non-negative, each horizon summing to 1) and the
+    reply that is invalid here (a flat forecast); the default prompt is
+    byte-identical to the merged text PR A pinned, and nothing of the weights
+    track leaked into it.
+    """
+    for needle in ("weights-v1", "weight rows", "non-negative", "summing to 1", "flat forecast"):
+        assert needle in WEIGHTS_SYSTEM_PROMPT, needle
+    assert "forecast-v2" not in WEIGHTS_SYSTEM_PROMPT
+    assert WEIGHTS_SYSTEM_PROMPT != IMPROVER_SYSTEM_PROMPT
+    assert IMPROVER_SYSTEM_PROMPT == DEFAULT_PROMPT
+
+
+def test_propose_and_record_system_prompt_default_and_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prompt blob carries the system text actually sent, for either object space.
+
+    The default leaves the blob's system text at IMPROVER_SYSTEM_PROMPT; the
+    weights keyword puts WEIGHTS_SYSTEM_PROMPT there instead — and both runs'
+    recorded responses replay through their own prompt keys, the weights one
+    re-deriving its child at zero cost.
+    """
+    monkeypatch.setenv("EVOLVETS_LLM_API_KEY", KEY)
+    root = tmp_path / "ledgers"
+
+    run = start_run(root, "improver-default-system")
+    record = propose(
+        run,
+        client=ScriptedClient(LLMResponse(reply("mean start", EDITED_SOURCE), 10, 5, "end_turn")),
+    )
+    run.end("completed", {})
+    payload = record.payload
+    assert isinstance(payload, Proposal)
+    assert blob_json(run.blobs, payload.prompt_blob)[0]["system"] == IMPROVER_SYSTEM_PROMPT
+
+    weights_run = start_run(root, "improver-weights-system")
+    weights_record = propose(
+        weights_run,
+        client=ScriptedClient(
+            LLMResponse(reply("sharper tracking", WEIGHTS_EDITED_SOURCE), 12, 6, "end_turn")
+        ),
+        parent_source=WEIGHTS_REFERENCE_ARTIFACT_SOURCE,
+        system_prompt=WEIGHTS_SYSTEM_PROMPT,
+    )
+    weights_run.end("completed", {})
+    weights_payload = weights_record.payload
+    assert isinstance(weights_payload, Proposal)
+    assert blob_json(weights_run.blobs, weights_payload.prompt_blob)[0]["system"] == (
+        WEIGHTS_SYSTEM_PROMPT
+    )
+    assert blob_json(weights_run.blobs, weights_payload.child_artifact) == WEIGHTS_EDITED_SOURCE
+
+    weights_user = user_prompt(WEIGHTS_REFERENCE_ARTIFACT_SOURCE, empty_observation())
+    responses = recorded_responses(weights_run.blobs, records_of(root, "improver-weights-system"))
+    assert responses[prompt_key(WEIGHTS_SYSTEM_PROMPT, weights_user)] == LLMResponse(
+        reply("sharper tracking", WEIGHTS_EDITED_SOURCE), 12, 6, "end_turn"
+    )
+    replay_run = start_run(root, "improver-weights-replay")
+    replay = propose(
+        replay_run,
+        client=RecordedLLMClient(responses),
+        parent_source=WEIGHTS_REFERENCE_ARTIFACT_SOURCE,
+        system_prompt=WEIGHTS_SYSTEM_PROMPT,
+    )
+    replay_run.end("completed", {})
+    replay_payload = replay.payload
+    assert isinstance(replay_payload, Proposal)
+    assert blob_json(replay_run.blobs, replay_payload.child_artifact) == WEIGHTS_EDITED_SOURCE
+    assert replay.budget == Budget()  # zero tokens and zero wall: an audit, not a call
+    # the default run's key resolves under the default system text — the two
+    # object spaces never share a prompt key
+    default_user = user_prompt(REFERENCE_ARTIFACT_SOURCE, empty_observation())
+    defaults = recorded_responses(run.blobs, records_of(root, "improver-default-system"))
+    assert prompt_key(IMPROVER_SYSTEM_PROMPT, default_user) in defaults
+    assert prompt_key(WEIGHTS_SYSTEM_PROMPT, weights_user) not in defaults

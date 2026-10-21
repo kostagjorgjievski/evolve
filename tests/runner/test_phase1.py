@@ -8,7 +8,8 @@ the protocol: the ledger order propose -> predict -> allocate -> evaluate ->
 accept, predictions durable before the evaluation they forecast, equal
 budgets through one accounting, hill-climb acceptance after every evaluated
 proposal — failures included — and the replay reproducing a source run's
-control flow from its records at zero token cost.
+control flow from its records at zero token cost. TASK_018 PR B added the
+weights-only condition's tests (5-6 of that PR) after the replay section.
 """
 
 from __future__ import annotations
@@ -25,9 +26,13 @@ from pytest import CaptureFixture, MonkeyPatch
 from evolvets.allocator.interfaces import Candidate
 from evolvets.cache.datasets import public_inputs
 from evolvets.cache.store import build_cache
-from evolvets.improver.artifacts import REFERENCE_ARTIFACT_SOURCE
+from evolvets.improver.artifacts import (
+    REFERENCE_ARTIFACT_SOURCE,
+    WEIGHTS_REFERENCE_ARTIFACT_SOURCE,
+)
 from evolvets.improver.client import LLMClientConfig
 from evolvets.improver.interfaces import LLMResponse
+from evolvets.improver.prompt import WEIGHTS_SYSTEM_PROMPT
 from evolvets.ledger.blobs import BlobStore
 from evolvets.ledger.payloads import QUANTILE_KEYS, RunEnd
 from evolvets.ledger.schema import Budget, Record
@@ -114,7 +119,9 @@ class StubEvaluator:
 
     The default outcome (an ``EvalOutcome``, or an ``Exception`` to raise)
     serves every source without an entry, so a test that mis-scripts a child
-    still gets a recorded evaluation rather than a silent skip.
+    still gets a recorded evaluation rather than a silent skip. ``requests``
+    keeps each whole worker request, so a test can pin the interface, config
+    and pool a condition evaluated under.
     """
 
     def __init__(
@@ -123,6 +130,7 @@ class StubEvaluator:
         self.outcomes = dict(outcomes)
         self.default = default
         self.calls: list[str] = []
+        self.requests: list[dict[str, Any]] = []
 
     def __call__(
         self, request: dict[str, Any], *, timeout_seconds: float, memory_gib: float
@@ -130,6 +138,7 @@ class StubEvaluator:
         del timeout_seconds, memory_gib
         source = str(request["source"])
         self.calls.append(source)
+        self.requests.append(dict(request))
         outcome = self.outcomes.get(source, self.default)
         if isinstance(outcome, Exception):
             raise outcome
@@ -828,6 +837,103 @@ def test_replay_of_wall_exhaustion_between_allocation_and_evaluation(
     assert run_end_of(replay_records).status == run_end_of(source_records).status
     verify_run(tmp_path, "source")
     verify_run(tmp_path, "replay")
+
+
+# --- TASK_018 PR B: the weights-only condition (tests 5-6) -------------------------
+
+
+#: One params edit of the weights reference: the share step's effective rate doubled.
+WEIGHTS_CHILD = WEIGHTS_REFERENCE_ARTIFACT_SOURCE.replace(
+    "row[e] * math.exp(-eta * (losses[e] - low))",
+    "row[e] * math.exp(-2.0 * eta * (losses[e] - low))",
+)
+#: A flat-forecast child: the forecast-v2 reference's module as a reply, the
+#: shape that ignored the rows rule. The arena scores it invalid_weights.
+FLAT_CHILD = REFERENCE_ARTIFACT_SOURCE
+
+
+def invalid_weights() -> EvalOutcome:
+    """An invalid_weights outcome, as the arena scores a flat reply under weights-v1."""
+    return EvalOutcome(
+        status="invalid_weights",
+        result_obj=None,
+        series_wall_seconds=(),
+        error="invalid_weights: TypeError: weights must be a list or a tuple, got ForecastOutput",
+        wall_seconds=0.05,
+    )
+
+
+def test_weights_only_rows_child_climbs_and_flat_child_is_invalid(
+    pool: tuple[Path, Path], tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A rows-output child is evaluated ok and accepted; a flat child is invalid_weights.
+
+    The flat reply is recorded honestly (evaluation invalid_weights,
+    acceptance False) and joins no fit history — the mechanism that keeps the
+    object space honest — while the rows child climbs and becomes the next
+    generation's parent.
+    """
+    sight = Sight()
+    seams = install(
+        monkeypatch,
+        responses=[reply(WEIGHTS_CHILD), reply(FLAT_CHILD)],
+        outcomes={
+            WEIGHTS_REFERENCE_ARTIFACT_SOURCE: ok(1.0),
+            WEIGHTS_CHILD: ok(0.8),
+            FLAT_CHILD: invalid_weights(),
+        },
+        sight=sight,
+    )
+    spec = lineage_spec(condition="weights_only", proposals_per_generation=1, max_evaluations=3)
+    assert lineage_run(pool, tmp_path, spec, "run-weights") == 0
+    records = records_of(tmp_path, "run-weights")
+    # the baseline evaluated the weights reference at its config under weights-v1
+    baseline_request = seams.evaluator.requests[0]
+    assert baseline_request["source"] == WEIGHTS_REFERENCE_ARTIFACT_SOURCE
+    assert baseline_request["config"] == {"eta": 1.0, "alpha": 0.01}
+    assert baseline_request["interface"] == "weights-v1"
+    assert seams.clients[0].prompts[0][0] == WEIGHTS_SYSTEM_PROMPT  # the weights contract
+    evaluations = [r for r in records if r.kind == "evaluation"]
+    acceptances = [r for r in records if r.kind == "acceptance"]
+    assert [e.payload.status for e in evaluations] == ["ok", "invalid_weights"]
+    assert [a.payload.accepted for a in acceptances] == [True, False]
+    assert acceptances[0].payload.new_artifact is not None
+    assert acceptances[1].payload.new_artifact is None
+    # the flat child joined no fit history; the rows child's generation-0 gain did
+    assert sight.histories[0] == []
+    assert len(sight.histories[1]) == 1
+    assert sight.histories[1][0].gain == pytest.approx(1.0 - 0.8)
+    proposals = [r for r in records if r.kind == "proposal"]
+    assert proposals[1].payload.parent_artifact == proposals[0].payload.child_artifact
+    verify_run(tmp_path, "run-weights")
+
+
+def test_weights_only_registry_predictive_with_visible_quantiles(
+    pool: tuple[Path, Path], tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """CONDITIONS["weights_only"] is the treatment's shape over the weights-v1 space.
+
+    Same predictive allocator, quantiles visible: every candidate the spy
+    allocator was handed carries the five predicted quantile keys, so the
+    ablation differs from the treatment in the object space and nothing else.
+    """
+    condition = CONDITIONS["weights_only"]
+    assert condition.proposer_id == "llm_edit"
+    assert condition.allocator_id == "predictive"
+    assert condition.interface == "weights-v1"
+    assert condition.reference_updater_id == "weights_reference"
+    assert condition.system_prompt == WEIGHTS_SYSTEM_PROMPT
+    sight = Sight()
+    install(
+        monkeypatch,
+        responses=[reply(WEIGHTS_CHILD), reply(WEIGHTS_CHILD)],
+        outcomes={WEIGHTS_REFERENCE_ARTIFACT_SOURCE: ok(1.0), WEIGHTS_CHILD: ok(0.9)},
+        sight=sight,
+    )
+    spec = lineage_spec(condition="weights_only", max_evaluations=2)
+    assert lineage_run(pool, tmp_path, spec, "run-weights-registry") == 0
+    assert all(set(candidate.quantiles) == set(QUANTILE_KEYS) for candidate in sight.candidates[0])
+    verify_run(tmp_path, "run-weights-registry")
 
 
 # --- Test 20: the CLI ---------------------------------------------------------------

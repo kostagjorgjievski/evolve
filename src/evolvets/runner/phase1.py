@@ -48,6 +48,8 @@ from evolvets.cache.datasets import DEV_DATASETS
 from evolvets.improver.artifacts import (
     REFERENCE_ARTIFACT_CONFIG,
     REFERENCE_ARTIFACT_SOURCE,
+    WEIGHTS_REFERENCE_ARTIFACT_CONFIG,
+    WEIGHTS_REFERENCE_ARTIFACT_SOURCE,
     artifact_family,
     const_change_stats,
     diff_lines,
@@ -58,7 +60,7 @@ from evolvets.improver.client import (
     RecordedLLMClient,
 )
 from evolvets.improver.interfaces import LLMClient, ProposalFeatures
-from evolvets.improver.prompt import IMPROVER_SYSTEM_PROMPT
+from evolvets.improver.prompt import IMPROVER_SYSTEM_PROMPT, WEIGHTS_SYSTEM_PROMPT
 from evolvets.improver.propose import propose_and_record, recorded_responses
 from evolvets.ledger.blobs import BlobStore
 from evolvets.ledger.payloads import (
@@ -95,7 +97,7 @@ EVAL_WALL_MARGIN_SECONDS = 60.0
 MAX_REPAIR_ROUNDS = 1
 
 #: The allocators whose candidates carry the self-model's quantiles; every
-#: prediction-blind rival's candidates carry ``{}`` (PR B adds weights_only).
+#: prediction-blind rival's candidates carry ``{}``.
 _QUANTILE_VISIBLE = frozenset({"predictive", "shuffled", "weights_only"})
 
 #: The acceptance rule's name in the ledger.
@@ -122,7 +124,7 @@ class Condition:
     allocator_id: str  # one of ALLOCATOR_IDS
     interface: str  # "forecast-v2" | "weights-v1"
     reference_updater_id: str  # "reference" | "weights_reference"
-    system_prompt: str  # IMPROVER_SYSTEM_PROMPT in PR A
+    system_prompt: str  # IMPROVER_SYSTEM_PROMPT, or WEIGHTS_SYSTEM_PROMPT
 
 
 def _forecast_condition(allocator_id: str) -> Condition:
@@ -137,8 +139,9 @@ def _forecast_condition(allocator_id: str) -> Condition:
 
 
 #: The Phase 1 conditions of the forecast-v2 object space: the treatment
-#: (``predictive``), its prediction-blind rivals, its ablation, and the
-#: non-LLM track of the treatment. PR B adds ``weights_only``.
+#: (``predictive``), its prediction-blind rivals, and the non-LLM track of
+#: the treatment. ``weights_only`` is the treatment's ablation: the same
+#: predictive allocator over the weights-v1 object space.
 CONDITIONS: dict[str, Condition] = {
     allocator_id: _forecast_condition(allocator_id)
     for allocator_id in (
@@ -157,6 +160,13 @@ CONDITIONS["random_param"] = Condition(
     interface="forecast-v2",
     reference_updater_id="reference",
     system_prompt=IMPROVER_SYSTEM_PROMPT,
+)
+CONDITIONS["weights_only"] = Condition(
+    proposer_id="llm_edit",
+    allocator_id="predictive",
+    interface="weights-v1",
+    reference_updater_id="weights_reference",
+    system_prompt=WEIGHTS_SYSTEM_PROMPT,
 )
 
 
@@ -182,7 +192,8 @@ class LineageSpec:
 
 def _reference_artifact(condition: Condition) -> tuple[str, dict[str, ConfigValue]]:
     """The starting artifact of the condition's object space: (source, config)."""
-    del condition  # PR B switches this on the interface; forecast-v2 has one reference
+    if condition.interface == "weights-v1":
+        return WEIGHTS_REFERENCE_ARTIFACT_SOURCE, dict(WEIGHTS_REFERENCE_ARTIFACT_CONFIG)
     return REFERENCE_ARTIFACT_SOURCE, dict(REFERENCE_ARTIFACT_CONFIG)
 
 
@@ -626,6 +637,7 @@ class _Engine:
                 client=self._client,
                 client_config=self._spec.client_config,
                 max_repair_rounds=MAX_REPAIR_ROUNDS,
+                system_prompt=self._condition.system_prompt,
             )
             self.state.records.append(record)
             payload = record.payload

@@ -35,6 +35,8 @@ from evolvets.improver.artifacts import (
     MATH_MEMBERS,
     REFERENCE_ARTIFACT_CONFIG,
     REFERENCE_ARTIFACT_SOURCE,
+    WEIGHTS_REFERENCE_ARTIFACT_CONFIG,
+    WEIGHTS_REFERENCE_ARTIFACT_SOURCE,
     ArtifactError,
     artifact_family,
     artifact_updater,
@@ -45,6 +47,7 @@ from evolvets.improver.artifacts import (
 )
 from evolvets.improver.interfaces import FEATURE_NAMES, ProposalFeatures, feature_vector
 from evolvets.ledger.canonical import canonical_bytes
+from evolvets.updater.baselines import DEFAULT_CONFIGS, fixed_share
 from evolvets.updater.forecast import FORECAST_DEFAULT_CONFIGS, bias_share
 from evolvets.updater.interfaces import ForecastOutput
 from tests.updater.test_forecast import GOLDEN_DIGEST, matured, step_context
@@ -113,6 +116,61 @@ def test_reference_artifact_replays_bit_equal_to_bias_share(synthetic_pool) -> N
     assert result_to_obj(reference) == result_to_obj(baseline)
     digest = sha256(canonical_bytes(result_to_obj(reference))).hexdigest()
     assert digest == GOLDEN_DIGEST  # tests/updater/test_forecast.py pinned it for bias_share
+
+
+# --- TASK_018 PR B: the weights reference artifact (tests 1-2) ---------------------
+
+
+#: The SHA-256 of WEIGHTS_REFERENCE_ARTIFACT_SOURCE, pinned by TASK_018 (PR B)
+#: exactly as REFERENCE_SHA256 pins the forecast-v2 reference: the weights-only
+#: condition's parity test means something only against immutable starting
+#: bytes, and changing this digest needs a reason in the PR.
+WEIGHTS_REFERENCE_SHA256 = "f94bc37f42c3ea85d617ac1d08422e0fd8020e05b884c849789994b852a1f79e"
+
+
+def test_weights_reference_artifact_is_valid_and_pinned() -> None:
+    """The weights reference validates, is a normalized fixed point, and its bytes are pinned.
+
+    Its config is Fixed-Share's placeholder config (``_DEFAULT_CONFIGS``), the
+    task's anchor while translating: the artifact is the same learner at the
+    same starting point, in a different object space.
+    """
+    validate_artifact_source(WEIGHTS_REFERENCE_ARTIFACT_SOURCE)
+    assert normalized_source(WEIGHTS_REFERENCE_ARTIFACT_SOURCE) == WEIGHTS_REFERENCE_ARTIFACT_SOURCE
+    assert sha256(WEIGHTS_REFERENCE_ARTIFACT_SOURCE.encode("utf-8")).hexdigest() == (
+        WEIGHTS_REFERENCE_SHA256
+    )
+    assert dict(WEIGHTS_REFERENCE_ARTIFACT_CONFIG) == dict(DEFAULT_CONFIGS["fixed_share"])
+    assert WEIGHTS_REFERENCE_ARTIFACT_SOURCE != REFERENCE_ARTIFACT_SOURCE
+
+
+def test_weights_reference_replays_bit_equal_to_fixed_share(synthetic_pool) -> None:
+    """The weights reference replays synthetic-dev exactly as fixed_share under weights-v1.
+
+    The grammar forces the same operations in the same order as
+    FixedShare.update and _share_step, and the rows the artifact returns are
+    transposed the same way the class transposes them, so the replay is
+    bit-equal — the anchor that lets the weights-only lineage start at the
+    artifact and still speak the Gate 1 world's numbers.
+    """
+    reference = replay_dataset(
+        artifact_updater(WEIGHTS_REFERENCE_ARTIFACT_SOURCE),
+        WEIGHTS_REFERENCE_ARTIFACT_CONFIG,
+        0,
+        synthetic_pool,
+        interface="weights-v1",
+    )
+    baseline = replay_dataset(
+        fixed_share,
+        DEFAULT_CONFIGS["fixed_share"],
+        0,
+        synthetic_pool,
+        interface="weights-v1",
+    )
+    assert reference.status == "ok"
+    assert reference.metrics == baseline.metrics
+    assert [score.mase for score in reference.series] == [score.mase for score in baseline.series]
+    assert result_to_obj(reference) == result_to_obj(baseline)
 
 
 # --- Test 3: config parity --------------------------------------------------------

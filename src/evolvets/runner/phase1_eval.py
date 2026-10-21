@@ -14,9 +14,10 @@ to the child's stdin; the child loads the dev pool, replays the artifact
 over it (a fresh adapter per series, per-series wall stamped like gate1's
 timed factory) and writes one JSON reply stamped with ``WORKER_PROTOCOL``.
 Every parent-side failure — a timeout, a nonzero exit, an empty, garbled,
-oversized or wrongly-stamped reply — becomes an :class:`EvalOutcome` with
-status ``"failed"`` or ``"timeout"`` and a ``worker: ...`` error line; no
-child failure ever raises out of :func:`evaluate_source`.
+oversized, wrongly-stamped or errorless reply — becomes an
+:class:`EvalOutcome` with status ``"failed"`` or ``"timeout"`` and a
+``worker: ...`` error line; no child failure ever raises out of
+:func:`evaluate_source`.
 
 Imports are the arena's dev side, the replay loop and the artifact loader:
 ``runner`` is instrument code, not agent-editable code, so the import-linter
@@ -88,8 +89,15 @@ def evaluate_source(
     "foundation_models": [...], "cache_root": str, "data_root": str,
     "manifest_dir": str, "foundation_root": str}``. The child runs under
     ``RLIMIT_AS = memory_gib`` GiB and is killed, process group and all, at
-    ``timeout_seconds`` of wall clock; its outcome never raises here.
+    ``timeout_seconds`` of wall clock; its outcome never raises here. The two
+    limits themselves are caller configuration, not worker behaviour, so a
+    limit that is not finite and positive raises ``ValueError`` before any
+    child is spawned: a negative address-space cap is ``RLIM_INFINITY`` (a
+    silently uncapped child) and a zero one fails the exec in confusing ways.
     """
+    for name, limit in (("timeout_seconds", timeout_seconds), ("memory_gib", memory_gib)):
+        if not math.isfinite(limit) or limit <= 0:
+            raise ValueError(f"{name} must be finite and > 0, got {limit!r}")
     cap = int(memory_gib * 2**30)
 
     def limit_address_space() -> None:
@@ -177,7 +185,7 @@ def _parse_reply(
             return _failed_outcome(
                 stderr, "an ok reply must carry a result and no error", wall_seconds
             )
-    elif result_obj is not None or not (error is None or isinstance(error, str)):
+    elif result_obj is not None or not (isinstance(error, str) and error):
         return _failed_outcome(
             stderr, "a failed reply must carry an error and no result", wall_seconds
         )

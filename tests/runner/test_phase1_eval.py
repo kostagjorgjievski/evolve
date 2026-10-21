@@ -30,6 +30,7 @@ from evolvets.improver.artifacts import (
     artifact_updater,
     validate_artifact_source,
 )
+from evolvets.ledger.payloads import Evaluation
 from evolvets.runner import phase1_eval
 from evolvets.runner.phase1_eval import EvalOutcome, evaluate_source
 
@@ -232,6 +233,57 @@ def test_unstamped_and_oversized_replies_are_failed_outcomes(
     assert oversized.error is not None
     assert oversized.error.startswith("worker: ")
     assert "exceeds" in oversized.error
+
+
+@pytest.mark.parametrize("status", ["failed", "invalid_weights"])
+@pytest.mark.parametrize("error", ["null", '""'])
+def test_errorless_non_ok_reply_is_a_worker_failure(
+    monkeypatch: pytest.MonkeyPatch, status: str, error: str
+) -> None:
+    """A non-ok reply without a non-empty error is a worker failure, not a silent pass.
+
+    The engine copies ``outcome.error`` straight into ledger records, and
+    ``Evaluation`` rejects a non-ok record whose error is not a non-empty
+    string — so a malformed reply must fold into a failed outcome whose
+    error line itself satisfies that rule (review item 1).
+    """
+    reply = (
+        f'{{"worker": "1", "status": "{status}", "result": null, '
+        f'"series_wall_seconds": [], "error": {error}}}'
+    )
+    stub = f"import sys; sys.stdin.read(); sys.stdout.write({reply!r})"
+    monkeypatch.setattr(phase1_eval, "_CHILD_COMMAND", (sys.executable, "-c", stub))
+    outcome = evaluate_source({}, timeout_seconds=30.0, memory_gib=1.0)
+    assert outcome.status == "failed"
+    assert outcome.error is not None
+    assert outcome.error.startswith("worker: ")
+    assert len(outcome.error) > len("worker: ")  # non-empty detail after the prefix
+    # the error line is fit for the ledger: an Evaluation record takes it as is
+    Evaluation(
+        pool="dev", status=outcome.status, metrics={}, per_task_blob=None, error=outcome.error
+    )
+
+
+# --- Test 6b: caller misconfiguration -----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"timeout_seconds": 0.0, "memory_gib": 1.0},
+        {"timeout_seconds": -1.0, "memory_gib": 1.0},
+        {"timeout_seconds": float("inf"), "memory_gib": 1.0},
+        {"timeout_seconds": float("nan"), "memory_gib": 1.0},
+        {"timeout_seconds": 1.0, "memory_gib": 0.0},
+        {"timeout_seconds": 1.0, "memory_gib": -1.0},  # -1 is RLIM_INFINITY: no cap at all
+        {"timeout_seconds": 1.0, "memory_gib": float("inf")},
+        {"timeout_seconds": 1.0, "memory_gib": float("nan")},
+    ],
+)
+def test_degenerate_limits_raise_before_spawning(kwargs: dict[str, float]) -> None:
+    """Limits that are not finite and positive are a ValueError, not an uncapped child."""
+    with pytest.raises(ValueError):
+        evaluate_source({}, **kwargs)
 
 
 # --- Test 7: interface pass-through -------------------------------------------------

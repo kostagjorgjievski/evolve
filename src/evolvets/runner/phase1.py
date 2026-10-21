@@ -23,9 +23,9 @@ limit, so summed charges never overshoot a limit and a ``budget_exhausted``
 run still passes ``validate_run`` — the exit-0 and verify-clean contracts
 hold together. A replay (``replay_of``) re-runs a source lineage from its
 recorded responses — zero tokens, real evaluations — driven by the source's
-own per-generation counts rather than by its guards, which cannot bind at
-the same points at zero token cost, and reports ``matches_source_run`` over
-the aligned records.
+own per-generation proposal, chosen and evaluation counts rather than by its
+guards, which cannot bind at the same points at zero token cost, and reports
+``matches_source_run`` over the aligned records.
 """
 
 from __future__ import annotations
@@ -323,20 +323,24 @@ def _artifact_text(blobs: BlobStore, ref: str) -> str:
 
 @dataclass(frozen=True)
 class _SourceRun:
-    """The source lineage of a replay: its records, plan and wall total."""
+    """The source lineage of a replay: its records, status, plan and wall total."""
 
     records: tuple[Record, ...]
     wall_seconds_total: float
-    plan: tuple[tuple[int, int], ...]  # (proposals, chosen count) per generation
+    status: str  # the source's run_end status; a finished replay mirrors it
+    plan: tuple[tuple[int, int, int], ...]  # (proposals, chosen, evaluations) per generation
 
 
 def _read_source_run(ledger_root: Path, spec: LineageSpec) -> _SourceRun:
     """Read the replay's source run and its per-generation plan, refusing mismatches.
 
     The source must be a finished lineage of the same condition, dataset,
-    pool spec and seed; its plan is one ``(proposals, chosen)`` pair per
-    allocation, in ledger order, and its wall total sizes the replay's own
-    wall limit.
+    pool spec and seed; its plan is one ``(proposals, chosen, evaluations)``
+    triple per allocation, in ledger order, where ``evaluations`` counts the
+    evaluation records that followed that allocation — a round whose wall
+    reservation failed after its allocation ran fewer evaluations than it
+    chose, and the replay must not run what the source never did — and its
+    wall total sizes the replay's own wall limit.
     """
     records = tuple(LedgerReader(ledger_root, spec.replay_of or "").records())
     starts = [record for record in records if record.kind == "run_start"]
@@ -369,7 +373,7 @@ def _read_source_run(ledger_root: Path, spec: LineageSpec) -> _SourceRun:
                 f"replay source {spec.replay_of!r} ran {key} {source_value!r}, "
                 f"not {getattr(spec, key)!r}"
             )
-    plan: list[tuple[int, int]] = []
+    plan: list[list[int]] = []  # [proposals, chosen, evaluations], finalized below
     pending = 0
     for record in records:
         if record.kind == "proposal":
@@ -377,8 +381,10 @@ def _read_source_run(ledger_root: Path, spec: LineageSpec) -> _SourceRun:
         elif record.kind == "allocation":
             payload = record.payload
             assert isinstance(payload, Allocation)
-            plan.append((pending, len(payload.chosen)))
+            plan.append([pending, len(payload.chosen), 0])
             pending = 0
+        elif record.kind == "evaluation" and plan:
+            plan[-1][2] += 1
     if pending:
         raise Phase1Error(
             f"replay source {spec.replay_of!r} ends with {pending} proposal(s) no "
@@ -390,7 +396,8 @@ def _read_source_run(ledger_root: Path, spec: LineageSpec) -> _SourceRun:
     return _SourceRun(
         records=records,
         wall_seconds_total=float(wall),
-        plan=tuple(plan),
+        status=ends[-1].payload.status,
+        plan=tuple((proposals, chosen, ran) for proposals, chosen, ran in plan),
     )
 
 
@@ -567,17 +574,26 @@ class _Engine:
             if self._run.spent.evaluations < self._spec.max_evaluations:
                 self._finished_generations = generation
             return
-        for generation, (proposals, chosen) in enumerate(source.plan):
-            if not self._generation(generation, proposals, chosen):
+        for generation, (proposals, chosen, evaluations) in enumerate(source.plan):
+            if not self._generation(generation, proposals, chosen, evaluations):
                 return
         self._finished_generations = len(source.plan)
 
-    def _generation(self, generation: int, target: int, chosen_cap: int | None) -> bool:
+    def _generation(
+        self,
+        generation: int,
+        target: int,
+        chosen_cap: int | None,
+        evaluations_cap: int | None = None,
+    ) -> bool:
         """One propose -> predict -> allocate -> evaluate round; False ends on budget.
 
         ``chosen_cap`` truncates the allocator's choice (the source round's
         chosen count on a replay); ``None`` truncates to the evaluations the
-        budget still allows.
+        budget still allows. ``evaluations_cap`` stops the round's evaluation
+        loop at the evaluations the source round actually ran (``None`` on a
+        live run): a chosen proposal the source never evaluated — its
+        reservation failed after the allocation — is left unevaluated too.
         """
         parent_mase_at_proposal = self.state.current_mase
         made = self._propose(generation, target)
@@ -586,7 +602,7 @@ class _Engine:
             return False
         quantiles = self._predict(made)
         chosen = self._allocate(made, quantiles, chosen_cap)
-        return self._evaluate_and_accept(made, chosen, parent_mase_at_proposal)
+        return self._evaluate_and_accept(made, chosen, parent_mase_at_proposal, evaluations_cap)
 
     def _propose(self, generation: int, count: int) -> list[tuple[Record, ProposalFeatures]]:
         """Make up to ``count`` proposals, each reserved first; fewer when budget binds."""
@@ -687,14 +703,18 @@ class _Engine:
         made: Sequence[tuple[Record, ProposalFeatures]],
         chosen: Sequence[str],
         parent_mase_at_proposal: float,
+        evaluations_cap: int | None = None,
     ) -> bool:
         """Evaluate each chosen proposal in order, accept it if it climbs.
 
-        False ends the run ``budget_exhausted`` after the bookkeeping of the
-        evaluations already done.
+        On a replay ``evaluations_cap`` ends the loop after the source
+        round's evaluations. False ends the run ``budget_exhausted`` after
+        the bookkeeping of the evaluations already done.
         """
         by_id = {record.record_id: (record, features) for record, features in made}
-        for record_id in chosen:
+        for index, record_id in enumerate(chosen):
+            if evaluations_cap is not None and index >= evaluations_cap:
+                break  # the source chose this proposal but never afforded its evaluation
             if not _can_reserve_evaluation(self._spec, self._limits, self._run.spent):
                 self._stop_reason = (
                     f"evaluation of {record_id}: the wall budget cannot reserve "
@@ -829,8 +849,17 @@ class _Engine:
         return summary
 
     def finish(self, source: _SourceRun | None) -> int:
-        """End the run and return the exit code; exhaustion is a designed end, so 0."""
-        status = "completed" if self._finished_generations is not None else "budget_exhausted"
+        """End the run and return the exit code; exhaustion is a designed end, so 0.
+
+        A replay that finished the source's plan ends with the source's own
+        status — a replay of an exhausted lineage reads ``budget_exhausted``
+        like its source — and one that could not afford the plan ends
+        ``budget_exhausted`` like any run stopped early.
+        """
+        if source is not None and self._finished_generations is not None:
+            status = source.status
+        else:
+            status = "completed" if self._finished_generations is not None else "budget_exhausted"
         self._run.end(status, self._summary(source=source))
         return 0
 

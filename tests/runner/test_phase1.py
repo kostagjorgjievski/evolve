@@ -701,11 +701,12 @@ def _source_and_replay(
     replay_spec: LineageSpec,
     responses: Sequence[LLMResponse],
     outcomes: Mapping[str, EvalOutcome],
+    default: EvalOutcome | Exception | None = None,
 ) -> tuple[list[Record], list[Record]]:
     """Run the source live, then replay it; the two runs' records."""
-    install(monkeypatch, responses=responses, outcomes=outcomes)
+    install(monkeypatch, responses=responses, outcomes=outcomes, default=default)
     assert lineage_run(pool, tmp_path, source_spec, "source") == 0
-    install(monkeypatch, outcomes=outcomes)  # the replay needs the evaluator only
+    install(monkeypatch, outcomes=outcomes, default=default)  # the replay needs the evaluator
     assert lineage_run(pool, tmp_path, replay_spec, "replay") == 0
     return records_of(tmp_path, "source"), records_of(tmp_path, "replay")
 
@@ -783,6 +784,49 @@ def test_replay_of_mid_round_exhaustion_matches(
         assert replay_summary[key] == source_summary[key]
     assert replay_summary["budget_spent"]["llm_output_tokens"] == 0.0
     assert replay_summary["matches_source_run"] is True
+    verify_run(tmp_path, "replay")
+
+
+def test_replay_of_wall_exhaustion_between_allocation_and_evaluation(
+    pool: tuple[Path, Path], tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A source that exhausted wall after its allocation replays exactly its evaluations.
+
+    Test 15's shape: every evaluation charges 10 s of wall, so the source's
+    second chosen proposal fails its 100 + 60 s reservation after the
+    allocation that chose it. The replay's wall limit can afford that
+    evaluation, but it must not run it — the source's per-generation
+    evaluation count, not its chosen count, drives the round — and it ends
+    with the source's own status.
+    """
+    outcomes = {REFERENCE_ARTIFACT_SOURCE: ok(1.0, wall=10.0)}
+    both = dict(
+        condition="random_param",
+        proposals_per_generation=1,
+        max_evaluations=10,
+        max_wall_seconds=175.0,
+        eval_timeout_seconds=100.0,  # each evaluation reserves 100 + 60 seconds
+    )
+    source_records, replay_records = _source_and_replay(
+        pool,
+        tmp_path,
+        monkeypatch,
+        source_spec=lineage_spec(**both),
+        replay_spec=lineage_spec(replay_of="source", **both),
+        responses=(),
+        outcomes=outcomes,
+        default=ok(1.5, wall=10.0),
+    )
+    source_summary = run_end_of(source_records).summary
+    replay_summary = run_end_of(replay_records).summary
+    assert source_summary["generations"] == 2  # the second round allocated, then could not pay
+    assert source_summary["evaluations"] == 1
+    for key in ("generations", "proposals", "predictions", "evaluations"):
+        assert replay_summary[key] == source_summary[key]
+    assert replay_summary["matches_source_run"] is True
+    assert replay_summary["timeout_status_mismatches"] == 0
+    assert run_end_of(replay_records).status == run_end_of(source_records).status
+    verify_run(tmp_path, "source")
     verify_run(tmp_path, "replay")
 
 

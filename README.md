@@ -61,7 +61,7 @@ All expert forecasts are computed once on GPUs and cached, so evaluating a new i
 
 Three experiments decided where the system should work. Full write-ups are in [`docs/results/`](docs/results/).
 
-**1. Tuned classical rules already match foundation models.** Hedge and Fixed-Share, tuned in a 16-hour run, are within 1% of the best single foundation model on ETTh1, ECL and synthetic data (development-set MASE 0.813 vs 0.815, 0.684 vs 0.689, 0.777 vs 0.777). [Report](docs/results/gate1-dev-first-run.md)
+**1. Combining foundation models with tuned classical rules adds almost nothing over the best single foundation model.** With the three foundation models in the expert pool, tuned Hedge and Fixed-Share land within 1% of the best single foundation model on ETTh1, ECL and synthetic data (development-set MASE 0.813 vs 0.815, 0.684 vs 0.689, 0.777 vs 0.777; the ETTh1 and ECL numbers are leakage-risk, since a foundation model may have seen these datasets in pretraining). On the classical pool alone the tuned rules are far behind (ETTh1 0.925, ECL 0.920). [Report](docs/results/gate1-dev-first-run.md)
 
 **2. Learning better weights is saturated.** Two learned updaters (a constrained ridge stacker and a loss-predicting gate) beat the tuned baseline in 1 of 12 comparisons, by 0.4%. [Report](docs/results/gate1-learned-probe.md)
 
@@ -94,7 +94,7 @@ The codebase is developed by AI agents working through GitHub, with a human owne
 
 ```
 Owner (direction, research gates) → Planner agent (task specs) → Developer agent (small PRs)
-      → CI (ruff, mypy, import-linter, pytest) → Reviewer agent (independent model) → squash-merge
+      → CI (ruff, mypy, import-linter, pytest) → Reviewer agent (independent agent) → squash-merge
 ```
 
 Agents coordinate only through pull requests, issues and comment markers. They cannot edit the verifier, the CI rules or their own operating procedures. Long GPU jobs run on self-hosted lab runners. The project has 120+ merged pull requests; see [`docs/AGENT_LOOP.md`](docs/AGENT_LOOP.md) and [`AGENTS.md`](AGENTS.md).
@@ -114,6 +114,8 @@ Levels follow [The Last AI Built by Humans](https://arxiv.org/abs/2609.11873).
 Details are in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Repository layout
+
+All packages live under [`src/evolvets/`](src/evolvets/); the paths below are relative to it.
 
 | Package | Role |
 |---|---|

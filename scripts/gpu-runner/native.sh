@@ -36,9 +36,11 @@ case "$cmd" in
     mkdir -p "$bin"
     export PATH="$bin:$PATH"
     if ! "$bin/uv" --version >/dev/null 2>&1; then
-      curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$bin" INSTALLER_NO_MODIFY_PATH=1 sh \
-        || python3 -m pip install --target "$bin/.uvpkg" -i https://pypi.tuna.tsinghua.edu.cn/simple uv \
-             && ln -sf "$bin/.uvpkg/bin/uv" "$bin/uv"
+      rm -f "$bin/uv"
+      if ! curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="$bin" INSTALLER_NO_MODIFY_PATH=1 sh; then
+        python3 -m pip install --target "$bin/.uvpkg" -i https://pypi.tuna.tsinghua.edu.cn/simple uv
+        ln -sf "$bin/.uvpkg/bin/uv" "$bin/uv"
+      fi
     fi
     "$bin/uv" --version
     cd "$dir"

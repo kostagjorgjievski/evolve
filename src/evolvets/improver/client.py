@@ -13,12 +13,18 @@ environment at call time — a configuration names the *variable*
 (``EVOLVETS_LLM_API_KEY``), never a value.
 
 ``prompt_key`` names a prompt by the canonical JSON of its two texts, and
-``RecordedLLMClient`` serves recorded outcomes by that name: the replay
-path, which makes no network call and charges zero tokens and zero wall. A
-prompt whose recorded call raised is served as :class:`RecordedLLMFailure`:
-``complete`` re-raises the recorded ``LLMClientError`` message, with no
-audit of its own (the replay attempted nothing), so the proposer re-derives
-the same fallback draft at zero cost.
+``RecordedLLMClient`` serves each key's recorded outcomes first-in
+first-out (owner decision #165: the three proposals of one generation share
+one prompt and get three distinct replies): the replay path, which makes no
+network call and charges zero tokens and zero wall. A recorded call that
+raised is served as :class:`RecordedLLMFailure`: ``complete`` re-raises the
+recorded ``LLMClientError`` message, with no audit of its own (the replay
+attempted nothing), so the proposer re-derives the same fallback draft at
+zero cost. A key whose replies are used up raises
+:class:`RecordedRepliesExhausted` — deliberately not an ``LLMClientError``,
+so the proposer cannot swallow it into a fallback no-op: a replay that asks
+for a reply its records do not hold is a harness defect (AGENTS.md 2.8),
+never a fabricated proposal.
 """
 
 from __future__ import annotations
@@ -29,7 +35,8 @@ import os
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections import deque
+from collections.abc import Callable, Mapping, Sequence
 from typing import cast
 
 from evolvets.improver.interfaces import LLMResponse
@@ -88,6 +95,16 @@ class LLMClientError(RuntimeError):
     def __init__(self, message: str, call: LLMCall | None = None) -> None:
         super().__init__(message)
         self.call = call
+
+
+class RecordedRepliesExhausted(RuntimeError):
+    """A prompt key's recorded replies are used up: a harness defect, never a silent reuse.
+
+    Deliberately not an :class:`LLMClientError` subclass, so the proposer's
+    ``except LLMClientError`` cannot swallow exhaustion into a fallback
+    no-op — a replay that asks for a reply its records do not hold is
+    reported as one (AGENTS.md 2.8).
+    """
 
 
 def _clipped(body: str | None) -> str:
@@ -313,33 +330,51 @@ class RecordedLLMFailure:
 
 
 class RecordedLLMClient:
-    """Serves recorded outcomes by prompt; the replay path makes no network call.
+    """Serves each prompt key's recorded outcomes first-in first-out; no network call.
 
-    A replayed call charges zero tokens and zero wall (``last_call`` is a
-    zero-cost audit), so a lineage re-run from recorded responses costs
-    nothing — the replay is an audit, not a run. A key mapped to a
+    One key can hold a whole sequence of outcomes — the three proposals of a
+    generation share one prompt and get three distinct replies — and each
+    :meth:`complete` consumes the front one, in recorded order. A replayed
+    call charges zero tokens and zero wall (``last_call`` is a zero-cost
+    audit), so a lineage re-run from recorded responses costs nothing — the
+    replay is an audit, not a run. A key mapped to a
     :class:`RecordedLLMFailure` raises the recorded error instead, which is
     how a proposal whose call failed replays to the same fallback draft.
     """
 
-    def __init__(self, responses: Mapping[str, LLMResponse | RecordedLLMFailure]) -> None:
-        self._responses = dict(responses)
+    def __init__(self, responses: Mapping[str, Sequence[LLMResponse | RecordedLLMFailure]]) -> None:
+        # every key's sequence is copied into the client's own deque, so the
+        # caller's structures are never consumed or mutated
+        self._responses: dict[str, deque[LLMResponse | RecordedLLMFailure]] = {
+            key: deque(outcomes) for key, outcomes in responses.items()
+        }
         #: the audit of the last complete(): a zero-cost synthetic success
         self.last_call: LLMCall | None = None
 
     def complete(self, system: str, user: str) -> LLMResponse:
-        """Return the recorded response for ``prompt_key(system, user)``, or raise.
+        """Return the key's next recorded response in order, or raise.
 
-        A recorded failure raises its recorded message; an unknown key raises
-        naming the key's SHA-256. Neither sets ``last_call`` — the replay
-        attempted nothing, so there is no audit to expose.
+        ``last_call`` is reset on entry and set only when a response is
+        served — a replay that raised or found nothing attempted nothing, so
+        there is no audit to expose. A recorded failure raises its recorded
+        message; a key whose replies are used up raises
+        :class:`RecordedRepliesExhausted` naming the key's SHA-256; an
+        unknown key raises ``LLMClientError`` naming it.
         """
         key = prompt_key(system, user)
-        outcome = self._responses.get(key)
-        if outcome is None:
+        self.last_call = None
+        queue = self._responses.get(key)
+        if queue is None:
             raise LLMClientError(
                 "no recorded response for prompt key sha256:" + sha256_hex(key.encode("utf-8"))
             )
+        if not queue:
+            raise RecordedRepliesExhausted(
+                "the recorded replies for prompt key sha256:"
+                + sha256_hex(key.encode("utf-8"))
+                + " are used up"
+            )
+        outcome = queue.popleft()
         if isinstance(outcome, RecordedLLMFailure):
             raise LLMClientError(outcome.message)
         self.last_call = LLMCall(

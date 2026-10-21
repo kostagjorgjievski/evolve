@@ -15,12 +15,16 @@ client at all: ``proposer.model = null`` is exactly the owner's non-LLM
 track, on which the self-model (PR B) and the allocators (PR C) are tested.
 
 Every prompt and response is a blob, so a lineage replays from its records:
-``recorded_responses`` maps each call's prompt key to its recorded outcome
-and ``RecordedLLMClient`` serves them without a network call, charging zero
-tokens and zero wall. Repair prompts are distinct keys, so a whole call
-sequence replays — including a failed one: an audit with no text marks a
-call that raised, and it replays as the recorded error, so the same fallback
-draft is re-derived at zero cost. The API key never appears in a config blob, record, blob or
+``recorded_responses`` maps each call's prompt key to the list of its
+recorded outcomes in call order — duplicates preserved, the last-wins
+overwrite gone (owner decision #165: three proposals of one generation
+share one prompt and get three distinct replies) — and
+``RecordedLLMClient`` serves each key's replies first-in first-out without
+a network call, charging zero tokens and zero wall. Repair prompts are
+distinct keys, so a whole call sequence replays — including a failed one:
+an audit with no text marks a call that raised, and it replays as the
+recorded error, so the same fallback draft is re-derived at zero cost. The
+API key never appears in a config blob, record, blob or
 log: configuration carries the environment variable's name, and the client
 reads the value at call time.
 """
@@ -393,18 +397,22 @@ def propose_and_record(
 
 def recorded_responses(
     blobs: BlobStore, records: Iterable[Record]
-) -> dict[str, LLMResponse | RecordedLLMFailure]:
-    """Map every recorded call's prompt key to its outcome, from the proposals' blobs.
+) -> dict[str, list[LLMResponse | RecordedLLMFailure]]:
+    """Map every recorded call's prompt key to its outcomes, in order, from the proposals' blobs.
 
     Each proposal's prompt blob is the list of its calls' prompt objects and
     its response blob the matching list of audits. An audit with a text is a
-    successful call and maps to its :class:`LLMResponse`; an audit with no
-    text marks a call that raised :class:`LLMClientError` and maps to a
+    successful call and appends its :class:`LLMResponse`; an audit with no
+    text marks a call that raised :class:`LLMClientError` and appends a
     :class:`RecordedLLMFailure` carrying the recorded message, so a failed
     proposal replays — through :class:`RecordedLLMClient` raising that
-    message — to the same fallback draft at zero cost.
+    message — to the same fallback draft at zero cost. Outcomes append in
+    ledger record order and, within a proposal, in call order, so one key
+    can carry several calls' outcomes — duplicates preserved, never
+    overwritten — and :class:`RecordedLLMClient` serves them first-in
+    first-out.
     """
-    responses: dict[str, LLMResponse | RecordedLLMFailure] = {}
+    responses: dict[str, list[LLMResponse | RecordedLLMFailure]] = {}
     for record in records:
         if record.kind != "proposal" or not isinstance(record.payload, Proposal):
             continue
@@ -421,12 +429,14 @@ def recorded_responses(
         for prompt, audit in zip(prompts, audits, strict=True):
             key = prompt_key(str(prompt["system"]), str(prompt["user"]))
             if audit["text"] is None:  # the mark of a call that raised
-                responses[key] = RecordedLLMFailure(str(audit["error"]))
+                responses.setdefault(key, []).append(RecordedLLMFailure(str(audit["error"])))
             else:
-                responses[key] = LLMResponse(
-                    text=str(audit["text"]),
-                    input_tokens=int(cast("int", audit["input_tokens"])),
-                    output_tokens=int(cast("int", audit["output_tokens"])),
-                    stop_reason=cast("str | None", audit["stop_reason"]),
+                responses.setdefault(key, []).append(
+                    LLMResponse(
+                        text=str(audit["text"]),
+                        input_tokens=int(cast("int", audit["input_tokens"])),
+                        output_tokens=int(cast("int", audit["output_tokens"])),
+                        stop_reason=cast("str | None", audit["stop_reason"]),
+                    )
                 )
     return responses

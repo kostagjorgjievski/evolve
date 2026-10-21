@@ -1,4 +1,4 @@
-Status: active
+Status: done (PR A split by the size rule into A1 #163 and A2 #164; PR B as #166; PR C as #172; PR D as #173, which closes the task)
 
 # Task 018: the Phase 1 lineage runner (entry 19, item f)
 

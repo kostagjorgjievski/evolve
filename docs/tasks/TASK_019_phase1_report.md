@@ -93,7 +93,10 @@ registry's iteration order, restricted to the named conditions).
    `random.Random(bootstrap_seed)` per condition, 2000 resamples, the gate1
    interval indexes. The pilot is one seed and one run per condition: the
    interval is a series-resampling interval only, and the Notes say so.
-   Fewer than two series gives `None` (rendered `n/a`). A condition that
+   Fewer than two series gives `None` (rendered `n/a`): the builder
+   special-cases `n < 2` before calling `_gap_rows`, which assumes at
+   least two series — a one-series call would return `None` bounds, a
+   zero-series call would divide by zero. A condition that
    accepted nothing has all-zero differences: mean 0.0, interval [0.0, 0.0].
 3. **Self-model calibration.** Over every proposal of the condition that
    has both a prediction record and an `ok` evaluation: realized gain = the
@@ -344,7 +347,11 @@ records only), `accepted`, `starting_mase`, `best_mase`, `replay_of` and
 the four `budget_spent` sums, where `budget_spent.evaluations` equals the
 charges of the `baseline` and `evaluation` records (baseline included,
 hence one more than the `evaluations` count) — and refuse, naming the run
-and the key, on any mismatch with `run_end.summary`. The summary is a
+and the key, on any mismatch with `run_end.summary`. The summary's
+`budget_spent` values are floats while its other keys are ints; the
+recomputation counts evaluations and tokens as ints (the `ConditionRow`
+stores those ints) and sums wall seconds as floats, so the comparison
+against the summary is by value (`7 == 7.0`). The summary is a
 derived view; the report's numbers come from the records, and this check is
 what makes that a fact rather than a claim.
 
@@ -356,7 +363,8 @@ order); `starting_mase` the baseline's. The bootstrap differences pair the
 baseline record's and the final artifact's evaluation record's
 `result["series"]` by `series_id` (equal ids in equal order, else refusal);
 `GapRow` comes from `_gap_rows([(condition, differences)],
-bootstrap_seed)`. `distinct_forecast_start_mase` is the tuple of distinct
+bootstrap_seed)`, the call skipped under two series (Definition 2's
+`None`). `distinct_forecast_start_mase` is the tuple of distinct
 `starting_mase` values over the tabled `forecast-v2` rows (the
 `weights-v1` row excluded), first-seen order in registry order. Calibration
 and inheritance follow the definitions exactly; `mean_*` are `_loop_mean`s.
@@ -365,15 +373,20 @@ and inheritance follow the definitions exactly; `mean_*` are `_loop_mean`s.
 
 Fixtures: lineages built with the `test_phase1.py` machinery over the
 shift3 fixture — `predictive` with two accepted climbs, `fixed` with no
-acceptance, `random_param`, `weights_only` — each with its holdout run from
-the `test_phase1_holdout.py` builders, one replay of `predictive`, one
-aborted lineage; refusals on hand-built copies.
+acceptance, `evaluate_all` at the same `budget_limits` as `fixed` (every
+candidate evaluated, none accepted), `random_param`, `weights_only` — each
+with its holdout run from the `test_phase1_holdout.py` builders, one
+replay of `predictive`, one aborted lineage; refusals on hand-built
+copies.
 
 1. **Rows and order:** rows follow the `CONDITIONS` registry order over the
    named conditions; every count equals the record-kind count;
    `evaluations_charged` is one more than `evaluations`; `starting_mase`,
-   `best_mase`, the token sums and wall come from the records, and
-   `evaluate_all`'s token spend exceeds `fixed`'s on the fixtures.
+   `best_mase`, the token sums and wall come from the records. At the
+   fixtures' equal limits, `fixed`'s proposal count and token spend exceed
+   `evaluate_all`'s — evaluating fewer candidates per generation, it runs
+   more generations to spend the same evaluation budget — while
+   `evaluations_charged` is equal across the two: the equal-budget point.
 2. **Summary cross-check fires:** hand-built runs with a wrong `best_mase`,
    a wrong token sum and a wrong `accepted` are each refused, naming run
    and key.
@@ -391,8 +404,11 @@ aborted lineage; refusals on hand-built copies.
    `weights_only`'s differs.
 6. **Calibration:** counts of realized, not-ok and never-evaluated over the
    fixture's proposals; coverages equal hand counts inside the quantile
-   pairs; means are loop means; a no-proposal lineage (output budget paid
-   for none) gives zeros and `None` coverages.
+   pairs; means are loop means; a no-proposal lineage (built like
+   `test_phase1.py`'s output-budget test, on a smaller `llm_output_tokens`
+   limit) gives zeros and `None` coverages — named in its own report build,
+   never next to the standard fixtures, whose `budget_limits` it does not
+   share (the equal-budget refusal would reject the pair).
 7. **Parent at proposal:** a generation-2 proposal's realized gain uses the
    accepted generation-1 child's MASE, not the baseline's (the two-climb
    fixture).
@@ -535,7 +551,8 @@ Over the PR A fixtures:
    `n/a` in `random_param`'s gain-per-1M-tokens cell; a `budget_exhausted`
    run is tabled with its status shown.
 5. **Calibration:** coverages as shares `.4f`, `n/a` for the no-proposal
-   condition; the three count columns hold the fixture's hand counts.
+   condition (rendered from its own report build, per PR A test 6); the
+   three count columns hold the fixture's hand counts.
 6. **Inheritance:** the rate is `hurt / judged` rendered `.4f`, `n/a` when
    `judged == 0`; `unjudgeable` and `not_ok_rows` shown; the
    missing-holdout sentence appears exactly when it should.

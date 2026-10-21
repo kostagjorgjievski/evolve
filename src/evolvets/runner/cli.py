@@ -54,8 +54,10 @@ from evolvets.foundation.store import (
     foundation_cache_id,
     verify_foundation_cache,
 )
+from evolvets.improver.client import LLMClientConfig
 from evolvets.ledger.canonical import canonical_json
 from evolvets.ledger.payloads import RunEnd
+from evolvets.ledger.schema import Budget
 from evolvets.ledger.store import LedgerLockedError, LedgerReader, LedgerWriter
 from evolvets.ledger.validate import validate_run
 from evolvets.runner.gate1_grids import GATE1_GRIDS
@@ -64,6 +66,7 @@ from evolvets.runner.gate1_probe import PROBE_GRIDS, ProbeSpec, probe
 from evolvets.runner.gate1_report import ReportError, build_report
 from evolvets.runner.gate1_sealed import plan_from_tune_run, sealed_run
 from evolvets.runner.gate1_tune import DevPaths, TuneSpec, tune
+from evolvets.runner.phase1 import CONDITIONS, LineageSpec, run_lineage
 from evolvets.runner.runs import RunError, current_git_commit, new_run_id
 from evolvets.updater.baselines import BASELINE_IDS, BASELINES, DEFAULT_CONFIGS
 from evolvets.updater.forecast import (
@@ -549,6 +552,110 @@ def build_parser() -> argparse.ArgumentParser:
         "--sealed-cache-root",
         default="data/sealed_cache",
         help="sealed cache root directory (never the public cache root)",
+    )
+
+    phase1 = subparsers.add_parser(
+        "phase1", help="Phase 1: self-evolution lineages over dev pools in the ledger"
+    )
+    phase1_sub = phase1.add_subparsers(dest="phase1_command", metavar="PHASE1-COMMAND")
+    phase1_lineage_cmd = phase1_sub.add_parser(
+        "lineage", help="run one lineage: propose, predict, allocate, evaluate, accept"
+    )
+    phase1_lineage_cmd.add_argument(
+        "--condition",
+        metavar="ID",
+        required=True,
+        help=f"condition id, one of {sorted(CONDITIONS)}",
+    )
+    phase1_lineage_cmd.add_argument(
+        "--dataset",
+        choices=_TUNABLE_DATASETS,
+        required=True,
+        help="dev dataset to run on (holdouts score accepted edits only)",
+    )
+    phase1_lineage_cmd.add_argument(
+        "--pool-spec",
+        choices=POOL_SPECS,
+        required=True,
+        help="which pool spec to replay",
+    )
+    phase1_lineage_cmd.add_argument(
+        "--foundation-model",
+        nargs="+",
+        metavar="NAME",
+        help="foundation models to join (simple+foundation only; default: the registry)",
+    )
+    phase1_lineage_cmd.add_argument("--seed", type=int, default=0, help="run seed (default: 0)")
+    phase1_lineage_cmd.add_argument(
+        "--proposals-per-generation",
+        type=int,
+        default=3,
+        help="proposals each generation makes (default: 3)",
+    )
+    phase1_lineage_cmd.add_argument(
+        "--eval-slots", type=int, default=1, help="evaluations each generation may run (default: 1)"
+    )
+    phase1_lineage_cmd.add_argument(
+        "--max-evaluations",
+        type=int,
+        default=16,
+        help="evaluation budget, baseline included (default: 16)",
+    )
+    phase1_lineage_cmd.add_argument(
+        "--max-generations", type=int, default=64, help="generation cap (default: 64)"
+    )
+    phase1_lineage_cmd.add_argument(
+        "--llm-max-input-tokens",
+        type=int,
+        default=2_000_000,
+        help="input-token budget of the run (default: 2000000)",
+    )
+    phase1_lineage_cmd.add_argument(
+        "--llm-max-output-tokens",
+        type=int,
+        default=200_000,
+        help="output-token budget of the run (default: 200000)",
+    )
+    phase1_lineage_cmd.add_argument(
+        "--max-wall-seconds",
+        type=float,
+        default=43200.0,
+        help="wall-clock budget of the run in seconds (default: 43200, twelve hours)",
+    )
+    phase1_lineage_cmd.add_argument(
+        "--eval-timeout-seconds",
+        type=float,
+        default=1800.0,
+        help="wall deadline of one subprocess evaluation (default: 1800)",
+    )
+    phase1_lineage_cmd.add_argument(
+        "--eval-memory-gib",
+        type=float,
+        default=8.0,
+        help="memory cap of one subprocess evaluation in GiB (default: 8)",
+    )
+    phase1_lineage_cmd.add_argument(
+        "--replay-from",
+        metavar="RUN_ID",
+        help="replay a finished lineage of the same condition from its recorded responses",
+    )
+    phase1_lineage_cmd.add_argument(
+        "--run-id", metavar="ID", help="run id (default: a fresh phase1-<condition> id)"
+    )
+    phase1_lineage_cmd.add_argument(
+        "--ledger-root", default="ledgers", help="ledger root directory (contains <run_id>/)"
+    )
+    phase1_lineage_cmd.add_argument(
+        "--cache-root", default="cache_store", help="cache root directory"
+    )
+    phase1_lineage_cmd.add_argument(
+        "--foundation-root",
+        default=_FOUNDATION_ROOT,
+        help="foundation cache root directory (as 'evolvets foundation build')",
+    )
+    phase1_lineage_cmd.add_argument("--data-root", default="data", help="data root directory")
+    phase1_lineage_cmd.add_argument(
+        "--manifest-dir", default="data/manifests", help="directory holding the manifests"
     )
     return parser
 
@@ -1155,6 +1262,79 @@ def _cmd_gate1_sealed(args: argparse.Namespace) -> int:
     return 0 if status == "completed" else 2
 
 
+def _phase1_spec(args: argparse.Namespace) -> LineageSpec:
+    """Build the lineage spec from the CLI arguments; the client config is default."""
+    condition = CONDITIONS.get(args.condition)
+    is_llm = condition is not None and condition.proposer_id == "llm_edit"
+    return LineageSpec(
+        condition=args.condition,
+        dataset=args.dataset,
+        pool_spec=args.pool_spec,
+        foundation_models=tuple(args.foundation_model) if args.foundation_model else None,
+        seed=args.seed,
+        proposals_per_generation=args.proposals_per_generation,
+        eval_slots=args.eval_slots,
+        max_evaluations=args.max_evaluations,
+        max_generations=args.max_generations,
+        budget_limits=Budget(
+            llm_input_tokens=args.llm_max_input_tokens,
+            llm_output_tokens=args.llm_max_output_tokens,
+            wall_seconds=args.max_wall_seconds,
+            evaluations=args.max_evaluations,
+        ),
+        eval_timeout_seconds=args.eval_timeout_seconds,
+        eval_memory_gib=args.eval_memory_gib,
+        client_config=LLMClientConfig() if is_llm else None,
+        replay_of=args.replay_from,
+    )
+
+
+def _cmd_phase1_lineage(args: argparse.Namespace) -> int:
+    """Run one Phase 1 lineage; OK plus the summary, then the same verify gate1 runs.
+
+    A refusal before ``run_start`` (an unknown condition, a missing key, an
+    unloadable pool, a budget that cannot reserve the baseline, an unusable
+    replay source, a dirty tree, a reused run id) is one FAIL line and writes
+    nothing; an aborted run is reported by run id. Exhaustion is a designed
+    end: exit 0 for ``completed`` and ``budget_exhausted``, 2 for ``aborted``,
+    and any verify violation is non-zero on top.
+    """
+    spec = _phase1_spec(args)
+    run_id = args.run_id if args.run_id is not None else new_run_id(f"phase1-{spec.condition}")
+    ledger_root = Path(args.ledger_root)
+    main_stream = ledger_root / run_id / "main.jsonl"
+    reused = main_stream.exists()
+    try:
+        code = run_lineage(
+            spec,
+            ledger_root=ledger_root,
+            cache_root=Path(args.cache_root),
+            data_root=Path(args.data_root),
+            manifest_dir=Path(args.manifest_dir),
+            foundation_root=Path(args.foundation_root),
+            run_id=run_id,
+        )
+    except Exception as exc:
+        # A run this invocation started and aborted is reported by run id; a
+        # refusal before start is not.
+        if main_stream.exists() and not reused:
+            print(f"FAIL {run_id} aborted: {exc}")
+        else:
+            print(f"FAIL {exc}")
+        return 1
+    records = list(LedgerReader(ledger_root, run_id).records())
+    run_end = records[-1].payload
+    summary = run_end.summary if isinstance(run_end, RunEnd) else {}
+    status = run_end.status if isinstance(run_end, RunEnd) else "aborted"
+    if code == 0:
+        print(f"OK {run_id} {status}")
+    else:
+        print(f"FAIL {run_id} {status}: {summary.get('error', 'the run aborted')}")
+    print(canonical_json(summary))
+    verified = _cmd_ledger_verify(str(ledger_root), run_id)
+    return code if code != 0 else verified
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the EvolveTS CLI."""
     parser = build_parser()
@@ -1258,6 +1438,11 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_gate1_headroom(args)
         if args.gate1_command == "sealed":
             return _cmd_gate1_sealed(args)
+        parser.print_help()
+        return 0
+    if args.command == "phase1":
+        if args.phase1_command == "lineage":
+            return _cmd_phase1_lineage(args)
         parser.print_help()
         return 0
     if args.command is None:

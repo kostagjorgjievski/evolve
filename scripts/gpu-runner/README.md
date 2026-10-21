@@ -2,6 +2,15 @@
 
 Runs the self-hosted GitHub Actions runner for GPU jobs inside a container on the lab node.
 
+> **No Docker access?** (the DGX Spark `spark`): use `native.sh` instead. It runs the
+> runner as your own user with labels `gpu,spark` and writes the job environment
+> to the runner's `.env`:
+> `RUNNER_TOKEN=<token> bash scripts/gpu-runner/native.sh setup && bash ~/actions-runner/native.sh start`.
+> On aarch64, `gpu-env.sh` installs torch from PyTorch's CUDA 13 index
+> (`EVOLVETS_TORCH_SPEC`, default `torch==2.9.1`) and everything else
+> hash-checked from `uv.lock`. Forecasts built there are not bit-identical to
+> sp-1's, so compare runs only against caches built on the same node.
+
 ## 1. Check that Docker can see the GPUs
 
 ```bash

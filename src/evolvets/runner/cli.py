@@ -68,6 +68,8 @@ from evolvets.runner.gate1_sealed import plan_from_tune_run, sealed_run
 from evolvets.runner.gate1_tune import DevPaths, TuneSpec, tune
 from evolvets.runner.phase1 import CONDITIONS, LineageSpec, run_lineage
 from evolvets.runner.phase1_holdout import run_holdout
+from evolvets.runner.phase1_report import build_phase1_report
+from evolvets.runner.phase1_report_data import Phase1ReportError, build_phase1_report_data
 from evolvets.runner.runs import RunError, current_git_commit, new_run_id
 from evolvets.updater.baselines import BASELINE_IDS, BASELINES, DEFAULT_CONFIGS
 from evolvets.updater.forecast import (
@@ -702,6 +704,27 @@ def build_parser() -> argparse.ArgumentParser:
     phase1_holdout_cmd.add_argument("--data-root", default="data", help="data root directory")
     phase1_holdout_cmd.add_argument(
         "--manifest-dir", default="data/manifests", help="directory holding the manifests"
+    )
+    phase1_report_cmd = phase1_sub.add_parser(
+        "report", help="regenerate the deterministic Phase 1 report of named pilot runs"
+    )
+    phase1_report_cmd.add_argument(
+        "--ledger-root", default="ledgers", help="ledger root directory (contains <run_id>/)"
+    )
+    phase1_report_cmd.add_argument(
+        "--run",
+        metavar="ID",
+        action="append",
+        required=True,
+        help="run id to report; repeatable, in report order",
+    )
+    phase1_report_cmd.add_argument(
+        "--bootstrap-seed", type=int, default=0, help="seed of the gain intervals' series bootstrap"
+    )
+    phase1_report_output = phase1_report_cmd.add_mutually_exclusive_group(required=True)
+    phase1_report_output.add_argument("--out", metavar="PATH", help="write the report to PATH")
+    phase1_report_output.add_argument(
+        "--check", metavar="PATH", help="compare the regenerated report against PATH"
     )
     return parser
 
@@ -1428,6 +1451,25 @@ def _cmd_phase1_holdout(args: argparse.Namespace) -> int:
     return code if code != 0 else verified
 
 
+def _cmd_phase1_report(args: argparse.Namespace) -> int:
+    """Build the Phase 1 report from the ledger, then write it or check a copy.
+
+    As ``gate1 report``: the report is built before anything is written, so a
+    refusal leaves ``--out`` unwritten; ``--check`` reports the first
+    differing line.
+    """
+    try:
+        report = build_phase1_report(
+            build_phase1_report_data(
+                Path(args.ledger_root), args.run, bootstrap_seed=args.bootstrap_seed
+            )
+        )
+    except Phase1ReportError as exc:
+        print(f"FAIL {exc}")
+        return 1
+    return _write_or_check(args, report)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the EvolveTS CLI."""
     parser = build_parser()
@@ -1538,6 +1580,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_phase1_lineage(args)
         if args.phase1_command == "holdout":
             return _cmd_phase1_holdout(args)
+        if args.phase1_command == "report":
+            return _cmd_phase1_report(args)
         parser.print_help()
         return 0
     if args.command is None:

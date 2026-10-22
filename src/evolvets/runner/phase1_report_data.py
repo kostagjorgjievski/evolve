@@ -18,8 +18,8 @@ holdout pairing, a protocol-version mix, lineages that did not run the same
 pool under the same limits, a holdout whose rows disagree with its lineage's
 acceptances, or a ``run_end`` summary the records do not reproduce. Runs
 that aborted, or never wrote their ``run_end``, are listed untabled with
-their reason and contribute nothing else (AGENTS.md 2.8: every run that
-started is in the report).
+their reason, keep their ``## Runs`` line and contribute nothing else
+(AGENTS.md 2.8: every run that started is in the report).
 
 Counts and token sums are ints; wall seconds accumulate left to right, as
 everywhere in the arena. The bootstrap is ``_gap_rows``'s, seeded afresh per
@@ -187,6 +187,21 @@ class InheritanceRow:
 
 
 @dataclass(frozen=True)
+class RunLine:
+    """One named run's ``## Runs`` line: its id, its kind and its status.
+
+    The kind is the spec's phrase — ``condition <condition>``, ``holdout of
+    <condition>``, ``replay of `<source run id>``` — and the status is the
+    run's own ``run_end`` status, or ``no run_end`` when it wrote none; a
+    run that fed no table still gets its line (AGENTS.md 2.8).
+    """
+
+    run_id: str
+    kind: str  # "condition <condition>" | "holdout of <condition>" | "replay of `<run id>`"
+    status: str  # the run_end status, or "no run_end"
+
+
+@dataclass(frozen=True)
 class Phase1ReportData:
     """Every number the Phase 1 pilot report shows, computed from the ledger alone."""
 
@@ -195,6 +210,7 @@ class Phase1ReportData:
     foundation_models: tuple[str, ...] | None
     seed: int
     git_commits: tuple[str, ...]  # distinct run_start commits, sorted
+    runs: tuple[RunLine, ...]  # every named run, registry order, the replay last
     rows: tuple[ConditionRow, ...]  # CONDITIONS registry order
     calibration: tuple[CalibrationRow, ...]  # same conditions, same order
     inheritance: tuple[InheritanceRow, ...]  # conditions with a holdout run
@@ -323,6 +339,11 @@ def _untabled_reason(run: _NamedRun) -> str:
             return error if isinstance(error, str) else str(error)
         return run.end.status
     return "no run_end"
+
+
+def _status_of(run: _NamedRun) -> str:
+    """The run's ``## Runs`` status: its ``run_end`` status, or ``no run_end``."""
+    return run.end.status if run.end is not None else "no run_end"
 
 
 def _read_named_run(root: Path, run_id: str) -> _NamedRun:
@@ -1004,6 +1025,40 @@ def build_phase1_report_data(
     if not row_sources:
         raise Phase1ReportError("no tabled lineage run remains: there is nothing to report")
 
+    # the `## Runs` lines: every named run, tabled or not, one line each —
+    # registry order over the named conditions, each lineage followed by its
+    # holdout's line, the replay last, so the order never follows the flags'
+    named_of = {run.condition: run for run in lineages if run is not replay}
+    run_lines: list[RunLine] = []
+    for condition in CONDITIONS:
+        lineage = named_of.get(condition)
+        if lineage is None:
+            continue
+        run_lines.append(
+            RunLine(
+                run_id=lineage.run_id,
+                kind=f"condition {condition}",
+                status=_status_of(lineage),
+            )
+        )
+        holdout = holdouts_of.get(lineage.run_id)
+        if holdout is not None:
+            run_lines.append(
+                RunLine(
+                    run_id=holdout.run_id,
+                    kind=f"holdout of {condition}",
+                    status=_status_of(holdout),
+                )
+            )
+    if replay is not None:
+        run_lines.append(
+            RunLine(
+                run_id=replay.run_id,
+                kind=f"replay of `{replay.replay_of}`",
+                status=_status_of(replay),
+            )
+        )
+
     # protocol versions agree across every named run
     versions = runs[0].start.protocol_versions
     for run in runs[1:]:
@@ -1202,6 +1257,7 @@ def build_phase1_report_data(
         foundation_models=foundation,
         seed=head.start.seed,
         git_commits=tuple(sorted({run.start.git_commit for run in runs})),
+        runs=tuple(run_lines),
         rows=tuple(rows),
         calibration=tuple(calibration),
         inheritance=tuple(inheritance),

@@ -4,7 +4,8 @@ Over the PR A fixtures: the pilot ledger of ``test_phase1_report_data``
 (rebuilt once for this module, as each module builds its own) feeds the nine
 required tests — byte-identical regeneration and the ``--out``/``--check``
 CLI (1), the refusal that writes nothing (2), the sections in their fixed
-order with every named run listed (3), the Conditions table's registry
+order with every named run listed, each `## Runs` line carrying its kind
+and status — tabled or not (3), the Conditions table's registry
 order, formats and ``budget_exhausted`` status (4), the calibration's
 shares and ``n/a`` cells (5), the inheritance rates, unjudgeable counts and
 the missing-holdout sentence (6), the replay audit in both match cases
@@ -189,6 +190,46 @@ def test_the_sections_appear_in_the_fixed_order_and_runs_lists_every_run(pilot: 
     runs = report[report.index("## Runs") : report.index("## Conditions")]
     for run_id in _ids(pilot):
         assert f"`{run_id}`" in runs
+
+
+def test_tabled_holdout_and_replay_lines_show_their_status(pilot: Pilot) -> None:
+    """Each `## Runs` line names id, kind and run_end status — holdouts and replay too."""
+    report = _report(pilot, _ids(pilot))
+    runs = report[report.index("## Runs") : report.index("## Conditions")]
+    assert "- `lineage-predictive`: condition predictive (budget_exhausted)" in runs
+    assert "- `holdout-predictive`: holdout of predictive (completed)" in runs
+    assert f"- `{pilot.replay}`: replay of `lineage-predictive` (budget_exhausted)" in runs
+
+
+def test_untabled_runs_keep_their_kind_and_status_in_runs(pilot: Pilot) -> None:
+    """An aborted run and one with no run_end still get their `## Runs` line.
+
+    Every run that started is in the report (AGENTS.md 2.8): the untabled
+    runs sit in the registry-order list with their kind and status — the
+    replay dropped, so its source's slot carries the no-run_end copy — and
+    only their absence from the tables moves to the runs-not-tabled section.
+    """
+    copy_run(pilot.ledger, "lineage-predictive", "render-no-end", keep_run_end=False)
+    ids = [*_ids(pilot, drop=["lineage-predictive"]), pilot.aborted, "render-no-end"]
+    report = _report(pilot, ids)
+    runs = report[report.index("## Runs\n") : report.index("## Conditions")]
+    assert runs.splitlines() == [
+        "## Runs",
+        "",
+        "- `render-no-end`: condition predictive (no run_end)",
+        "- `lineage-evaluate-all`: condition evaluate_all (budget_exhausted)",
+        "- `holdout-evaluate_all`: holdout of evaluate_all (completed)",
+        "- `lineage-fixed`: condition fixed (budget_exhausted)",
+        "- `holdout-fixed`: holdout of fixed (completed)",
+        "- `lineage-aborted`: condition random (aborted)",
+        "- `lineage-random-param`: condition random_param (budget_exhausted)",
+        "- `holdout-random_param`: holdout of random_param (completed)",
+        "- `lineage-weights`: condition weights_only (budget_exhausted)",
+        "- `holdout-weights_only`: holdout of weights_only (completed)",
+        "",
+    ]
+    not_tabled = report[report.index("## Runs not tabled") : report.index("## Notes")]
+    assert "`lineage-aborted`" in not_tabled and "`render-no-end`" in not_tabled
 
 
 # --- Test 4: the conditions table -----------------------------------------------------------------
@@ -441,9 +482,17 @@ def test_the_notes_sentences_appear_exactly_when_they_hold(pilot: Pilot) -> None
         "render-start-shifted",
     ]
     shifted = _report(pilot, shifted_ids)
+    shifted_notes = shifted[shifted.index("## Notes") :]
     assert (
         "The forecast-v2 conditions' starting MASE values are not bit-equal: "
-        "1.0000, 1.0500." in shifted[shifted.index("## Notes") :]
+        "1.0000, 1.0500." in shifted_notes
+    )
+    # the spec lists the sentence after the weights one it qualifies, before
+    # random_param's
+    assert (
+        shifted_notes.index("weights reference")
+        < shifted_notes.index("not bit-equal")
+        < shifted_notes.index("proposes without LLM tokens")
     )
 
 

@@ -11,22 +11,24 @@ reasons, and the fixed Notes. Every float is ``f"{x:.4f}"``, counts and
 tokens are ints, and ``None`` renders ``n/a``, so the same ledger and seed
 give byte-identical Markdown wherever the report is regenerated.
 
-Statuses render where the data carries them: the condition rows' own
-``run_end`` status, and the untabled runs' reasons. A tabled holdout or
-replay shows no status cell — the data holds none, and the report states
-nothing it did not read.
+Every ``## Runs`` line carries its run's own ``run_end`` status, or
+``no run_end`` when it wrote none — the tabled conditions' statuses show
+again in their table, and the runs that fed no table keep theirs here,
+before the runs-not-tabled section states their reason.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 
+from evolvets.runner.gate1_report_data import GapRow
 from evolvets.runner.phase1_report_data import Phase1ReportData
 
 __all__ = ["build_phase1_report"]
 
 #: The Notes sentences, fixed; the start-values one is conditional and
-#: rendered separately, for it appears only when the values disagree.
+#: rendered separately, right after the weights sentence it qualifies, for
+#: it appears only when the values disagree.
 _NOTES = (
     "- One seed, one run per condition, so cross-condition differences carry no "
     "seed-level uncertainty.",
@@ -59,11 +61,13 @@ def _table(header: Sequence[str], rows: Sequence[Sequence[str]]) -> list[str]:
     return lines
 
 
-def _interval_cell(mean: float | None, lower: float | None, upper: float | None) -> list[str]:
+def _interval_cell(interval: GapRow | None) -> list[str]:
     """The gain-interval cells: mean and bounds, each ``n/a`` when there are none."""
-    if lower is None or upper is None:
-        return [_opt(mean), "n/a"]
-    return [_opt(mean), f"[{_fmt(lower)}, {_fmt(upper)}]"]
+    if interval is None:
+        return ["n/a", "n/a"]
+    if interval.lower is None or interval.upper is None:
+        return [_fmt(interval.mean), "n/a"]
+    return [_fmt(interval.mean), f"[{_fmt(interval.lower)}, {_fmt(interval.upper)}]"]
 
 
 def _conditions_table(data: Phase1ReportData) -> list[str]:
@@ -113,20 +117,10 @@ def _conditions_table(data: Phase1ReportData) -> list[str]:
 
 def _gain_table(data: Phase1ReportData) -> list[str]:
     """The gain-interval table: one row per condition's series bootstrap."""
-    rows: list[tuple[str, ...]] = []
-    for row in data.rows:
-        interval = row.gain_interval
-        rows.append(
-            (
-                row.condition,
-                *_interval_cell(
-                    None if interval is None else interval.mean,
-                    None if interval is None else interval.lower,
-                    None if interval is None else interval.upper,
-                ),
-            )
-        )
-    return _table(("condition", "mean", "95% interval"), rows)
+    return _table(
+        ("condition", "mean", "95% interval"),
+        [(row.condition, *_interval_cell(row.gain_interval)) for row in data.rows],
+    )
 
 
 def _calibration_table(data: Phase1ReportData) -> list[str]:
@@ -196,21 +190,14 @@ def _inheritance_table(data: Phase1ReportData) -> list[str]:
 
 
 def _runs_lines(data: Phase1ReportData) -> list[str]:
-    """One line per named tabled run: the conditions with their holdouts, the replay last.
+    """One line per named run — id, kind and status — tabled or not.
 
-    The order is the registry's, each condition followed by its holdout's line,
-    so the section never follows the ``--run`` flags' order; untabled runs are
-    the next section's, with their reasons.
+    The order is the data's, so the section never follows the ``--run``
+    flags': the registry's, each condition followed by its holdout's line,
+    the replay last. The runs that fed no table carry their status here;
+    the runs-not-tabled section then states their reason.
     """
-    holdout_of = {row.condition: row.holdout_run_id for row in data.inheritance}
-    lines: list[str] = []
-    for row in data.rows:
-        lines.append(f"- `{row.run_id}`: condition {row.condition} ({row.status})")
-        if row.condition in holdout_of:
-            lines.append(f"- `{holdout_of[row.condition]}`: holdout of {row.condition}")
-    if data.replay is not None:
-        lines.append(f"- `{data.replay.run_id}`: replay of `{data.replay.source_run_id}`")
-    return lines
+    return [f"- `{run.run_id}`: {run.kind} ({run.status})" for run in data.runs]
 
 
 def _replay_lines(data: Phase1ReportData) -> list[str]:
@@ -319,7 +306,7 @@ def build_phase1_report(data: Phase1ReportData) -> str:
     if len(data.distinct_forecast_start_mase) > 1:
         values = ", ".join(_fmt(value) for value in data.distinct_forecast_start_mase)
         notes.insert(
-            2,
+            3,
             f"- The forecast-v2 conditions' starting MASE values are not bit-equal: {values}.",
         )
     lines.extend(["", "## Notes", "", *notes, ""])
